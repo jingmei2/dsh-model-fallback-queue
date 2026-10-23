@@ -301,6 +301,8 @@ function createRouter(config, log) {
         // 只由主动探测写入。UI 靠它们区分「刚测过·820ms」「很久没测过」「上次探测失败」，
         // 而不是只凭熔断状态猜——熔断是事后记账，本身没有预测能力。
         lastOkAt: 0, lastProbeAt: 0, probeLatencyMs: 0, probeOk: null,
+        // 探测自己的失败原因：探测不再写熔断器，所以原因要单独留一份给 UI 的悬浮提示
+        lastProbeCode: null, lastProbeMessage: '',
       };
       circuits.set(key, c);
     }
@@ -711,6 +713,8 @@ function createRouter(config, log) {
           lastProbeAt: c.lastProbeAt || null,
           probeLatencyMs: c.probeLatencyMs || null,
           probeOk: c.probeOk === null || c.probeOk === undefined ? null : c.probeOk === true,
+          // 上次探测的失败原因（探测不写熔断器，所以单独下发）
+          probeError: c.lastProbeCode ? { code: c.lastProbeCode, message: c.lastProbeMessage || null } : null,
         };
       };
       return {
@@ -1116,9 +1120,16 @@ export function apply(ctx, llm) {
       try { await stream.interrupt?.(); } catch { /* 流可能已结束 */ }
       return true;
     } catch (e) {
-      router.recordFailure(route, e?.code || 'UNKNOWN', e?.message, undefined, e?.status);
+      // 探测失败**只记证据，不动熔断器**。
+      // 为什么：探测是一条 maxTokens=1 的异形请求，某些厂商会以 400/429/超时拒绝它。
+      // 如果让它累计失败，60s 一次的周期探测会亲手把每条路由"熔断"掉——
+      // 监控把自己监控死，用户看到的就是"一片红、切过去也没用"。
+      // 真死了的路由由真实请求记账；探测只负责说明"上次探测没成功"。
+      const c = circuitOf(key);
       stampProbe(false);
-      ctx.logger?.info?.('[fallback-queue] probe failed: %s code=%s', key, e?.code);
+      c.lastProbeCode = typeof e?.code === 'string' && e.code ? e.code : 'UNKNOWN';
+      c.lastProbeMessage = normalizeReason(e?.message);
+      ctx.logger?.info?.('[fallback-queue] probe failed: %s code=%s (circuit untouched)', key, e?.code);
       return false;
     }
   }
@@ -1177,11 +1188,11 @@ export function apply(ctx, llm) {
         return settle('ok', { latencyMs });
       }
       const c = router.circuits.get(key);
-      ctx.logger?.info?.('[fallback-queue] manual switch NOT verified: %s code=%s', key, c?.lastCode);
+      ctx.logger?.info?.('[fallback-queue] manual switch NOT verified: %s code=%s', key, c?.lastProbeCode);
       return settle('fail', {
         latencyMs,
-        code: c?.lastCode || 'UNKNOWN',
-        message: normalizeReason(c?.lastMessage) || null,
+        code: c?.lastProbeCode || 'UNKNOWN',
+        message: c?.lastProbeMessage || null,
       });
     } catch (e) {
       return settle('fail', { latencyMs: Date.now() - startedAt, code: e?.code || 'UNKNOWN', message: e?.message || null });

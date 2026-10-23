@@ -91,8 +91,8 @@ window.__ModuleLoader__.load({
         failbackStrategy: 'P1 恢复策略',
         lastSwitchLabel: '最近切换：{from} → {to}{code}',
         aboutDesc: '当队列中某个模型故障（限流、限额、不可用）时，自动切换到下一个可用模型继续会话。P1 始终是当前会话模型，队列中添加的是后备模型（P2、P3…）。',
-        legend: '🟢 正常 · 🟡 半开探测恢复中 · 🔴 已熔断冷却中 · ⚪ 未启用',
-        aboutInfoHint: 'ⓘ 悬浮可看到熔断原因（模型返回的原文）与预计恢复时间',
+        legend: '🟢 可用（有新鲜证据） · 🟡 风险（探测失败/偏慢） · 🔴 熔断 · ⚪ 未验证（没测过或证据过期）',
+        aboutInfoHint: 'ⓘ 悬浮可看到探测耗时、多久前测过、失败原因（模型返回的原文）与预计恢复时间',
         // 输入框芯片
         currentTag: '当前',
         sessionModelUnknown: '当前会话模型',
@@ -147,7 +147,8 @@ window.__ModuleLoader__.load({
         pickerAddN: '添加 {n} 个到队列',
         pickerTierHeader: '厂商：{name}',
         pickerNoneSelected: '请先勾选至少一个模型',
-        pingInterval: '周期健康探测间隔（毫秒，0=关闭；默认 60000=每 60 秒确认一次）',
+        probeSection: '周期健康探测',
+        pingInterval: '间隔（毫秒，0=关闭；默认 60000=每 60 秒确认一次）',
         pingSkipPaid: '周期探测跳过付费模型（省配额）',
         pingCostWarn: '⚠ 周期探测会向模型发送真实请求，可能消耗配额/费用；付费模型默认跳过，可在下方关闭跳过',
         queueRowHint: '📌=最后兜底（大保底）· 颜色=健康状态，价格改用文字标注',
@@ -155,7 +156,7 @@ window.__ModuleLoader__.load({
         // 也不再表示"你在不在 P1"。免费/付费降级成灰色文字标签。
         healthOk: '可用',
         healthSlow: '偏慢',
-        healthProbeFailed: '上次探测失败',
+        healthProbeFailed: '探测失败',
         healthUnprobed: '未验证',
         healthUnprobedHint: '还没有探测或真实请求的结果，不能假定它可用',
         healthSkipPaidHint: '周期探测跳过了付费模型；点「探测全部」可立刻测一次',
@@ -166,7 +167,7 @@ window.__ModuleLoader__.load({
         healthVerifying: '已过冷却，等一次探测确认',
         healthRecoverIn: '{age}后恢复',
         healthUnknown: '未知',
-        legendHealth: '颜色=健康：●绿 刚确认可用 · ●黄 风险/待确认 · ●红 熔断 · ●灰 未验证',
+        legendHealth: '●绿 可用 · ●黄 风险 · ●红 熔断 · ●灰 未验证',
       },
       en: {
         addFallbackModel: 'Add fallback model',
@@ -230,8 +231,8 @@ window.__ModuleLoader__.load({
         failbackStrategy: 'P1 recovery strategy',
         lastSwitchLabel: 'Last switch: {from} → {to}{code}',
         aboutDesc: 'When a model in the queue fails (rate limited, quota exhausted, unavailable), the session automatically continues on the next available model. P1 is always the current session model; entries added to the queue are fallbacks (P2, P3…).',
-        legend: '🟢 OK · 🟡 Half-open, probing · 🔴 Tripped, cooling down · ⚪ Disabled',
-        aboutInfoHint: 'ⓘ Hover to see the circuit reason (the raw model output) and the estimated recovery time',
+        legend: '🟢 Usable (fresh evidence) · 🟡 Risk (probe failed/slow) · 🔴 Tripped · ⚪ Unverified (never probed or stale)',
+        aboutInfoHint: 'ⓘ Hover for probe latency, how long ago it was checked, the failure reason (raw model output) and the estimated recovery time',
         currentTag: 'Current',
         sessionModelUnknown: 'Current session model',
         sessionModelSuffix: '{name} (session model)',
@@ -283,13 +284,14 @@ window.__ModuleLoader__.load({
         pickerAddN: 'Add {n} to queue',
         pickerTierHeader: 'Vendor: {name}',
         pickerNoneSelected: 'Check at least one model first',
-        pingInterval: 'Periodic health probe interval (ms, 0 = off; default 60000 = confirm every 60s)',
+        probeSection: 'Periodic health probe',
+        pingInterval: 'Interval (ms, 0 = off; default 60000 = check every 60s)',
         pingSkipPaid: 'Skip paid models in periodic probes (saves quota)',
         pingCostWarn: '⚠ Periodic probing sends real requests to models and may use quota/charges; paid models are skipped by default, disable the skip below to include them',
         queueRowHint: '📌 = last-resort · colour = health (price is text only)',
         healthOk: 'Healthy',
         healthSlow: 'Slow',
-        healthProbeFailed: 'Last probe failed',
+        healthProbeFailed: 'Probe failed',
         healthUnprobed: 'Unverified',
         healthUnprobedHint: 'No probe or real request result yet — cannot assume it works',
         healthSkipPaidHint: 'periodic probe skips paid models; press "probe all" to test it now',
@@ -300,7 +302,7 @@ window.__ModuleLoader__.load({
         healthVerifying: 'cooled down, waiting for a probe',
         healthRecoverIn: 'recovers in {age}',
         healthUnknown: 'unknown',
-        legendHealth: 'Colour = health: ●green just confirmed · ●amber risk/pending · ●red tripped · ●grey unverified',
+        legendHealth: '●green usable · ●amber risk · ●red tripped · ●grey unverified',
       },
     };
 
@@ -748,61 +750,79 @@ window.__ModuleLoader__.load({
      * @returns {{tone:string,text:string,detail:string}}
      */
     function healthOf(e, snap, now) {
-      if (!e) return { tone: 'muted', text: t('healthUnknown'), detail: '' };
-      if (e.invalid) return { tone: 'error', text: t('stateInvalid'), detail: '' };
+      if (!e) return { tone: 'muted', text: t('healthUnknown'), detail: '', short: '' };
+      if (e.invalid) return { tone: 'error', text: t('stateInvalid'), detail: '', short: '' };
       if (e.state === 'open') {
         const left = e.recoverAt ? Math.max(0, e.recoverAt - now) : 0;
         return {
           tone: 'error',
           text: t('stateTripped'),
           detail: e.recoverAt ? t('healthRecoverIn', { age: fmtAge(left) }) : '',
+          short: e.recoverAt ? fmtAge(left) : '',
         };
       }
       if (e.state === 'half_open') {
-        return { tone: 'warn', text: t('stateProbing'), detail: t('healthVerifying') };
+        return { tone: 'warn', text: t('stateProbing'), detail: t('healthVerifying'), short: '' };
       }
       // closed：只有"确凿且新鲜"的证据才给绿色，否则宁可是灰的
       // 老宿主快照没有证据字段（undefined）：退回旧语义（closed = 正常），
       // 不能让新客户端配老宿主时整片变灰——那看起来像插件坏了。
       const hasEvidenceFields = e.lastOkAt !== undefined || e.lastProbeAt !== undefined;
-      if (!hasEvidenceFields) return { tone: 'ok', text: t('stateOk'), detail: '' };
+      if (!hasEvidenceFields) return { tone: 'ok', text: t('stateOk'), detail: '', short: '' };
       const probedAt = e.lastProbeAt || 0;
       const okAt = e.lastOkAt || 0;
       const evidence = Math.max(probedAt, okAt);
       if (!evidence) {
-        // 付费条目会被周期探测跳过（省配额），所以"未验证"是常态而不是异常——
-        // 必须说清楚原因，否则用户会以为插件没在工作。
+        // 没有证据就是没证据：徽章只说「未验证」，原因（付费被跳过/还没跑过探测）
+        // 全部留在悬浮提示里——面板一行塞一整句解释，会把表撑成散文。
         const skipPaid = snap?.pingSkipPaid === true && e.paid === 'paid';
         return {
           tone: 'muted',
           text: t('healthUnprobed'),
           detail: skipPaid ? t('healthSkipPaidHint') : t('healthUnprobedHint'),
+          short: '',
         };
       }
       const age = Math.max(0, now - evidence);
       // 最近一次证据是"探测失败"（还没到熔断阈值）→ 黄：有风险，但还没被判死
       if (e.probeOk === false && probedAt >= okAt) {
-        return { tone: 'warn', text: t('healthProbeFailed'), detail: t('healthAgo', { age: fmtAge(age) }) };
+        const code = e.probeError?.code ? ` · ${e.probeError.code}` : '';
+        return {
+          tone: 'warn',
+          text: t('healthProbeFailed'),
+          detail: `${t('healthAgo', { age: fmtAge(age) })}${code}`,
+          short: t('healthAgo', { age: fmtAge(age) }),
+        };
       }
       // 探测周期开着时，超过 3 个周期（至少 3 分钟）没有新证据就降级成灰色：
       // 60s 周期下绿色最多"保鲜"3 分钟，探测停摆不会被永远当成健康。
       const interval = Number(snap?.pingIntervalMs) || 0;
       const staleAfter = interval > 0 ? Math.max(interval * 3, 180_000) : HEALTH_STALE_MS;
       if (age > staleAfter) {
-        return { tone: 'muted', text: t('healthStale'), detail: t('healthAgo', { age: fmtAge(age) }) };
+        return {
+          tone: 'muted',
+          text: t('healthStale'),
+          detail: t('healthAgo', { age: fmtAge(age) }),
+          short: t('healthAgo', { age: fmtAge(age) }),
+        };
       }
       const parts = [];
       if (probedAt && e.probeLatencyMs) parts.push(t('healthProbeMs', { ms: e.probeLatencyMs }));
       parts.push(t('healthAgo', { age: fmtAge(age) }));
       const slow = Number(e.probeLatencyMs) > HEALTH_SLOW_MS;
+      // 行内只留「多久以前确认过」，延迟进悬浮提示：这一格要窄到不挤掉右侧按钮。
       return {
         tone: slow ? 'warn' : 'ok',
         text: slow ? t('healthSlow') : t('healthOk'),
         detail: parts.join(' · '),
+        short: t('healthAgo', { age: fmtAge(age) }),
       };
     }
 
-    /** 健康徽章：健康色只出现在这里，队列行与面板行共用。 */
+    /**
+     * 健康徽章：健康色只出现在这里，队列行与面板行共用。
+     * 主标签只放状态词（+ 一个很短的"多久以前"），完整证据进悬浮提示。
+     */
     function healthBadge(e, snap, now) {
       if (!e) return null;
       const hs = healthOf(e, snap, now);
@@ -810,8 +830,15 @@ window.__ModuleLoader__.load({
       // 软熔断计数（连续失败 n/阈值）不上主标签，但别丢：进悬浮提示，
       // 否则"为什么还没熔断"只能去翻日志。
       const failures = Number(e.failures) > 0 ? t('failuresSuffix', { n: e.failures }) : '';
-      return h('span', { title: `${hs.detail || hs.text}${failures}`, style: { flex: 'none' } },
-        h(Badge, { tone: hs.tone }, `${hs.text}${hs.detail ? ` · ${hs.detail}` : ''}`));
+      const tip = [hs.detail, failures].filter(Boolean).join(' · ') || hs.text;
+      return h(
+        'span',
+        { title: tip, style: { flex: 'none', display: 'inline-flex', alignItems: 'baseline', gap: 4 } },
+        h(Badge, { tone: hs.tone }, hs.text),
+        hs.short
+          ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-label-secondary, #888)' } }, hs.short)
+          : null,
+      );
     }
 
     /**
@@ -867,6 +894,8 @@ window.__ModuleLoader__.load({
         const id = setInterval(() => setClockTick((n) => n + 1), 10_000);
         return () => clearInterval(id);
       }, []);
+      // 周期探测间隔的本地草稿（null = 跟随服务端值）
+      const [pingDraft, setPingDraft] = React.useState(null);
 
       const refresh = React.useCallback(async () => {
         // settings 只出配置；队列来自 state 文件（host.getQueue），两个来源不重叠
@@ -898,6 +927,15 @@ window.__ModuleLoader__.load({
       };
 
       const setMode = (m) => patch({ failbackMode: m });
+
+      // 周期探测间隔：失焦/回车才提交（见输入框注释）
+      const commitPingInterval = () => {
+        const raw = pingDraft;
+        setPingDraft(null);
+        if (raw === null) return;
+        const v = Math.max(0, Math.floor(Number(raw) || 0));
+        if (v !== (Number(cfg.pingIntervalMs) || 0)) void patch({ pingIntervalMs: v });
+      };
 
       // 队列写路径：只落 state 文件，不碰 settings，因此不会触发宿主主题全量重算
       const writeQueue = async (q) => {
@@ -1034,8 +1072,8 @@ window.__ModuleLoader__.load({
                       h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${r.provider} / ${r.model}`),
                       // F2 大保底标记
                       pinnedTagEl(r.pinned === true),
-                      // F3 免费/付费标记
-                      paidTag(r.paid),
+                      // 价格不再单独画一个标签：右边的轮转按钮本身写着 免费/付费/未标注，
+                      // 同一行里出现两次同样的东西只是把行撑宽。
                     ),
                     entry
                       ? healthBadge(entry, snap, Date.now())
@@ -1181,19 +1219,23 @@ window.__ModuleLoader__.load({
             ),
           ),
         ),
-        // F4 周期健康探测（默认关；打开会有真实请求，给出成本警告）
+        // F4 周期健康探测（默认开，60s；打开会有真实请求，给出成本警告）
         h(
           'div',
           null,
-          h('div', { style: { fontWeight: 600, marginBottom: 8 } }, t('probeAll')),
+          h('div', { style: { fontWeight: 600, marginBottom: 8 } }, t('probeSection')),
           h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
             h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' } },
               h('input', {
                 type: 'number',
                 min: 0,
                 step: 1000,
-                value: Number(cfg.pingIntervalMs) || 0,
-                onChange: (e) => { const v = Math.max(0, Number(e.target.value) || 0); patch({ pingIntervalMs: v }); },
+                // 受控输入 + 本地草稿：每敲一下就落盘会把用户输入顶回旧值（服务端回写覆盖），
+                // 结果是"输入框不听话"。失焦或回车才提交一次。
+                value: pingDraft === null ? (Number(cfg.pingIntervalMs) || 0) : pingDraft,
+                onChange: (e) => setPingDraft(e.target.value),
+                onBlur: commitPingInterval,
+                onKeyDown: (e) => { if (e.key === 'Enter') e.currentTarget.blur(); },
                 style: { width: 120, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #ddd))', background: 'transparent', color: 'inherit' },
               }),
               t('pingInterval'),
@@ -1680,15 +1722,10 @@ window.__ModuleLoader__.load({
                   )
                 : null,
               // 宿主确认回执：这是「真的发到了这条模型」的唯一实证，来自宿主自己的回写，
-              // 不依赖插件记账。用户问"怎么确定真切了"时，看这一行。
+              // 不依赖插件记账。没有实证时**什么都不画**——占一行写"还没有确认"是浪费面板。
               (() => {
                 const hc = snap?.hostConfirmed;
-                if (!hc) {
-                  return enabled
-                    ? h('div', { style: { padding: '5px 14px', fontSize: 10, lineHeight: '15px', color: 'var(--dsw-alias-label-secondary)', borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))' } },
-                        t('hostNotConfirmed'))
-                    : null;
-                }
+                if (!hc) return null;
                 const name = `${hc.provider} / ${hc.model}`;
                 return h(
                   'div',

@@ -135,10 +135,26 @@ window.__ModuleLoader__.load({
         pickerAddN: '添加 {n} 个到队列',
         pickerTierHeader: '厂商：{name}',
         pickerNoneSelected: '请先勾选至少一个模型',
-        pingInterval: '周期健康探测间隔（毫秒，0=关闭）',
+        pingInterval: '周期健康探测间隔（毫秒，0=关闭；默认 60000=每 60 秒确认一次）',
         pingSkipPaid: '周期探测跳过付费模型（省配额）',
         pingCostWarn: '⚠ 周期探测会向模型发送真实请求，可能消耗配额/费用；付费模型默认跳过，可在下方关闭跳过',
-        queueRowHint: '📌=最后兜底（大保底）· ●绿=免费 ●琥珀=付费',
+        queueRowHint: '📌=最后兜底（大保底）· 颜色=健康状态，价格改用文字标注',
+        // 健康证据（前瞻性）：颜色只表示"多久以前确认过它能回话"，不再表示价格、
+        // 也不再表示"你在不在 P1"。免费/付费降级成灰色文字标签。
+        healthOk: '可用',
+        healthSlow: '偏慢',
+        healthProbeFailed: '上次探测失败',
+        healthUnprobed: '未验证',
+        healthUnprobedHint: '还没有探测或真实请求的结果，不能假定它可用',
+        healthSkipPaidHint: '周期探测跳过了付费模型；点「探测全部」可立刻测一次',
+        healthStale: '证据过期',
+        healthAgo: '{age}前',
+        healthProbeMs: '探测{ms}ms',
+        healthRealOk: '真实请求成功',
+        healthVerifying: '已过冷却，等一次探测确认',
+        healthRecoverIn: '{age}后恢复',
+        healthUnknown: '未知',
+        legendHealth: '颜色=健康：●绿 刚确认可用 · ●黄 风险/待确认 · ●红 熔断 · ●灰 未验证',
       },
       en: {
         addFallbackModel: 'Add fallback model',
@@ -244,10 +260,24 @@ window.__ModuleLoader__.load({
         pickerAddN: 'Add {n} to queue',
         pickerTierHeader: 'Vendor: {name}',
         pickerNoneSelected: 'Check at least one model first',
-        pingInterval: 'Periodic health probe interval (ms, 0 = off)',
+        pingInterval: 'Periodic health probe interval (ms, 0 = off; default 60000 = confirm every 60s)',
         pingSkipPaid: 'Skip paid models in periodic probes (saves quota)',
         pingCostWarn: '⚠ Periodic probing sends real requests to models and may use quota/charges; paid models are skipped by default, disable the skip below to include them',
-        queueRowHint: '📌 = last-resort (safety net) · ●green=free ●amber=paid',
+        queueRowHint: '📌 = last-resort · colour = health (price is text only)',
+        healthOk: 'Healthy',
+        healthSlow: 'Slow',
+        healthProbeFailed: 'Last probe failed',
+        healthUnprobed: 'Unverified',
+        healthUnprobedHint: 'No probe or real request result yet — cannot assume it works',
+        healthSkipPaidHint: 'periodic probe skips paid models; press "probe all" to test it now',
+        healthStale: 'Stale evidence',
+        healthAgo: '{age} ago',
+        healthProbeMs: 'probe {ms}ms',
+        healthRealOk: 'real request ok',
+        healthVerifying: 'cooled down, waiting for a probe',
+        healthRecoverIn: 'recovers in {age}',
+        healthUnknown: 'unknown',
+        legendHealth: 'Colour = health: ●green just confirmed · ●amber risk/pending · ●red tripped · ●grey unverified',
       },
     };
 
@@ -543,8 +573,9 @@ window.__ModuleLoader__.load({
 
     // ---------- 设置页 ----------
 
-    const STATE_TONE = { closed: 'ok', half_open: 'warn', open: 'error' };
-    // 熔断三态 → 文案键（'closed'/'half_open'/'open' 是机器码，不翻译）
+    // 熔断三态 → 文案键（'closed'/'half_open'/'open' 是机器码，不翻译）。
+    // 颜色不从这里取：颜色统一由 healthOf() 决定（熔断状态 + 证据新鲜度），
+    // 否则"closed 但十分钟没测过"会被画成健康绿。
     const STATE_KEY = { closed: 'stateOk', half_open: 'stateProbing', open: 'stateTripped' };
 
     /** 熔断错误码 → 释义文案键（key 保持机器码，释义文案在 TEXT 表里） */
@@ -650,43 +681,113 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 队列条目的徽章色调：配置失效（invalid）优先于熔断三态。
-     * 宿主早就在快照里给了 invalid，并注明"UI 据此直接标配置失效"——之前 UI 没用它，
-     * 一条永远跑不通的路由会显示成"正常"。
-     * @param {object} entry snapshot 里的队列条目
-     * @returns {string|null} entry 缺失时返回 null（由调用方给兜底）
-     */
-    function entryTone(entry) {
-      if (!entry) return null;
-      if (entry.invalid) return 'error';
-      return STATE_TONE[entry.state] || 'muted';
-    }
-
-    /**
-     * 队列条目的徽章文案：配置失效优先于熔断三态。
-     * @param {object} entry snapshot 里的队列条目
-     * @returns {string|null} entry 缺失时返回 null（由调用方给兜底）
-     */
-    function entryText(entry) {
-      if (!entry) return null;
-      if (entry.invalid) return t('stateInvalid');
-      const key = STATE_KEY[entry.state];
-      return key ? t(key) : (entry.state || null);
-    }
-
-    /**
-     * 免费/付费标记（F3）：free 绿 / paid 琥珀 / unknown 无标记（避免噪音）。
-     * @param {string|null|undefined} paid 'free'|'paid'|'unknown'
-     * @returns {object|null} React 元素；unknown/缺失时返回 null
+     * 免费/付费标记（价格，与健康无关）。
+     * 原先用绿/琥珀着色，结果和健康色撞车：一条付费路由永远显示琥珀色，
+     * 用户看到的"黄"其实只是"要花钱"，却被读成"这条模型有问题"。
+     * 现在价格只做中性文字标签，颜色通道完全留给健康状态。
      */
     function paidTag(paid) {
-      if (paid === 'free') {
-        return h('span', { style: { fontSize: 10, color: '#3a9e5f', border: '1px solid #3a9e5f55', borderRadius: 4, padding: '0 4px', lineHeight: '14px' } }, t('paidFree'));
-      }
-      if (paid === 'paid') {
-        return h('span', { style: { fontSize: 10, color: '#c98a1b', border: '1px solid #c98a1b55', borderRadius: 4, padding: '0 4px', lineHeight: '14px' } }, t('paidPaid'));
-      }
+      const neutral = {
+        fontSize: 10,
+        color: 'var(--dsw-alias-label-secondary, #888)',
+        border: '1px solid color-mix(in srgb, var(--dsw-alias-label-secondary, #888) 40%, transparent)',
+        borderRadius: 4,
+        padding: '0 4px',
+        lineHeight: '14px',
+        flex: 'none',
+      };
+      if (paid === 'free') return h('span', { style: neutral }, t('paidFree'));
+      if (paid === 'paid') return h('span', { style: neutral }, t('paidPaid'));
       return null;
+    }
+
+    /** 把毫秒数折成 "12s" / "8m" / "3h" 这种短标签。 */
+    function fmtAge(ms) {
+      const s = Math.max(0, Math.round(ms / 1000));
+      if (s < 60) return `${s}s`;
+      if (s < 3600) return `${Math.round(s / 60)}m`;
+      return `${Math.round(s / 3600)}h`;
+    }
+
+    /** 探测周期超过这个倍数没拿到任何证据，就不算"已确认"，降级成灰色。 */
+    const HEALTH_STALE_MS = 15 * 60_000;
+    /** 探测延迟超过这个值算"响应偏慢"（有风险但仍可用）。 */
+    const HEALTH_SLOW_MS = 5_000;
+
+    /**
+     * 一条路由的健康判定：熔断三态 **加上证据新鲜度**。
+     * 这是本插件唯一该用颜色的地方——绿=刚确认可用、黄=风险/待确认、红=熔断、灰=未验证。
+     * 熔断状态本身是"事后记账"（失败之后才变），单凭它 UI 没有任何前瞻性：
+     * 一条 20 分钟前就已经死了、但一直没被选中的路由会显示成"正常"。
+     * @param {object|null} e snapshot 条目（或 p1 视图）
+     * @param {object|null} snap 整个快照（取 pingIntervalMs 用）
+     * @param {number} now 当前时刻
+     * @returns {{tone:string,text:string,detail:string}}
+     */
+    function healthOf(e, snap, now) {
+      if (!e) return { tone: 'muted', text: t('healthUnknown'), detail: '' };
+      if (e.invalid) return { tone: 'error', text: t('stateInvalid'), detail: '' };
+      if (e.state === 'open') {
+        const left = e.recoverAt ? Math.max(0, e.recoverAt - now) : 0;
+        return {
+          tone: 'error',
+          text: t('stateTripped'),
+          detail: e.recoverAt ? t('healthRecoverIn', { age: fmtAge(left) }) : '',
+        };
+      }
+      if (e.state === 'half_open') {
+        return { tone: 'warn', text: t('stateProbing'), detail: t('healthVerifying') };
+      }
+      // closed：只有"确凿且新鲜"的证据才给绿色，否则宁可是灰的
+      // 老宿主快照没有证据字段（undefined）：退回旧语义（closed = 正常），
+      // 不能让新客户端配老宿主时整片变灰——那看起来像插件坏了。
+      const hasEvidenceFields = e.lastOkAt !== undefined || e.lastProbeAt !== undefined;
+      if (!hasEvidenceFields) return { tone: 'ok', text: t('stateOk'), detail: '' };
+      const probedAt = e.lastProbeAt || 0;
+      const okAt = e.lastOkAt || 0;
+      const evidence = Math.max(probedAt, okAt);
+      if (!evidence) {
+        // 付费条目会被周期探测跳过（省配额），所以"未验证"是常态而不是异常——
+        // 必须说清楚原因，否则用户会以为插件没在工作。
+        const skipPaid = snap?.pingSkipPaid === true && e.paid === 'paid';
+        return {
+          tone: 'muted',
+          text: t('healthUnprobed'),
+          detail: skipPaid ? t('healthSkipPaidHint') : t('healthUnprobedHint'),
+        };
+      }
+      const age = Math.max(0, now - evidence);
+      // 最近一次证据是"探测失败"（还没到熔断阈值）→ 黄：有风险，但还没被判死
+      if (e.probeOk === false && probedAt >= okAt) {
+        return { tone: 'warn', text: t('healthProbeFailed'), detail: t('healthAgo', { age: fmtAge(age) }) };
+      }
+      // 探测周期开着，但已经很久没有任何证据：说明它既没被测过也没被用过
+      const interval = Number(snap?.pingIntervalMs) || 0;
+      const staleAfter = interval > 0 ? Math.max(HEALTH_STALE_MS, interval * 3) : HEALTH_STALE_MS;
+      if (age > staleAfter) {
+        return { tone: 'muted', text: t('healthStale'), detail: t('healthAgo', { age: fmtAge(age) }) };
+      }
+      const parts = [];
+      if (probedAt && e.probeLatencyMs) parts.push(t('healthProbeMs', { ms: e.probeLatencyMs }));
+      parts.push(t('healthAgo', { age: fmtAge(age) }));
+      const slow = Number(e.probeLatencyMs) > HEALTH_SLOW_MS;
+      return {
+        tone: slow ? 'warn' : 'ok',
+        text: slow ? t('healthSlow') : t('healthOk'),
+        detail: parts.join(' · '),
+      };
+    }
+
+    /** 健康徽章：健康色只出现在这里，队列行与面板行共用。 */
+    function healthBadge(e, snap, now) {
+      if (!e) return null;
+      const hs = healthOf(e, snap, now);
+      if (!hs.text) return null;
+      // 软熔断计数（连续失败 n/阈值）不上主标签，但别丢：进悬浮提示，
+      // 否则"为什么还没熔断"只能去翻日志。
+      const failures = Number(e.failures) > 0 ? t('failuresSuffix', { n: e.failures }) : '';
+      return h('span', { title: `${hs.detail || hs.text}${failures}`, style: { flex: 'none' } },
+        h(Badge, { tone: hs.tone }, `${hs.text}${hs.detail ? ` · ${hs.detail}` : ''}`));
     }
 
     /**
@@ -713,6 +814,12 @@ window.__ModuleLoader__.load({
       // F4 探测全部：进行中 + 结果提示
       const [probing, setProbing] = React.useState(false);
       const [probeNote, setProbeNote] = React.useState(null);
+      // 相对时间刷新器：设置页不轮询快照，不 tick 的话"12s前"会冻住不更新。
+      const [, setClockTick] = React.useState(0);
+      React.useEffect(() => {
+        const id = setInterval(() => setClockTick((n) => n + 1), 10_000);
+        return () => clearInterval(id);
+      }, []);
 
       const refresh = React.useCallback(async () => {
         // settings 只出配置；队列来自 state 文件（host.getQueue），两个来源不重叠
@@ -849,7 +956,7 @@ window.__ModuleLoader__.load({
                       paidTag(r.paid),
                     ),
                     entry
-                      ? h(Badge, { tone: entryTone(entry) }, `${entryText(entry)}${entry.failures ? t('failuresSuffix', { n: entry.failures }) : ''}`)
+                      ? healthBadge(entry, snap, Date.now())
                       : null,
                     circuitInfoIcon(entry, snap),
                     // 点选切换：立刻把生效路由拉到这一条（不用等它故障）。
@@ -886,7 +993,7 @@ window.__ModuleLoader__.load({
                         'aria-label': t('queueRowHint'),
                         style: btnSmall,
                       },
-                      r.paid === 'free' ? '免费' : r.paid === 'paid' ? '付费' : '未标注',
+                      r.paid === 'free' ? t('paidFree') : r.paid === 'paid' ? t('paidPaid') : t('paidUnknown'),
                     ),
                     h(
                       'button',
@@ -1070,6 +1177,15 @@ window.__ModuleLoader__.load({
       const onOpenSettings = props.onOpenSettings;
       const [snap, setSnap] = React.useState(null);
       const [open, setOpen] = React.useState(false);
+      // 相对时间（"12s前"）的刷新器：快照内容不变时 setSnap 会跳过更新，
+      // 相对时间就会永久冻在某一次渲染上（显示"12s前"十分钟）。只在弹层打开时 tick：
+      // 关闭时芯片只显示颜色，不需要刷新，也避免无谓重渲染触发宿主侧栏重算。
+      const [, setClockTick] = React.useState(0);
+      React.useEffect(() => {
+        if (!open) return undefined;
+        const id = setInterval(() => setClockTick((n) => n + 1), 5000);
+        return () => clearInterval(id);
+      }, [open]);
       // 点击切换后的即时反馈：成功与失败都必须可见。旧实现里 manualFailback 失败
       // 会返回 null 被静默吞掉，用户点完完全不知道发生了什么。
       const [flash, setFlash] = React.useState(null);
@@ -1236,29 +1352,29 @@ window.__ModuleLoader__.load({
       // P1 已被顶掉（超时/限流失效）但仍在兜底——以 P1 自己的电路状态判定，
       // 而不是拿队列第一条（那是 P2）当 P1。
       const p1Leaning = Boolean(p1Entry && p1Entry.state !== 'closed');
-
-      let label;
-      let tone = 'muted';
       // 位置 → 显示名：-1 = P1 槽（p1Follow 下 = 会话模型，不在队列里）；
       // 队列下标 i 在 p1Follow 下显示为 P{i+2}（P2 起），静态模式下为 P{i+1}（P1 起）。
       // 曾把 p1Follow 下的下标 0 也当成 P1（迁就宿主一个下标两种身份的老 bug），
       // 结果标题把 P2 喊成 P1、行内却标在 P2——用户截图里"当前 P2、P1 行也亮"的分裂。
       const lbl = (idx) => (idx < 0 ? 'P1' : p1Follow ? `P${idx + 2}` : `P${idx + 1}`);
-      if (!enabled) label = 'P';
-      else if (allOpen) {
+      // 芯片颜色 = **当前生效路由自己的健康**，不再是"你在不在 P1"。
+      // 旧逻辑 tone = p1Active ? ok : warn，导致"切到 P3"必然变黄——用户把黄读成
+      // "P3 有问题"，其实黄只说明"你离开了 P1"。一个颜色只能表达一件事，而用户要的是
+      // 健康与前瞻："这条模型现在还靠谱吗、多久前确认过"。
+      const now = Date.now();
+      const effEntry = effective < 0 ? p1Entry : entries.find((x) => x.index === effective);
+      const effHealth = healthOf(effEntry, snap, now);
+      let label;
+      let tone;
+      if (!enabled) {
+        label = 'P';
+        tone = 'muted';
+      } else if (allOpen) {
         label = 'P!';
         tone = 'error';
-      } else if (halfOpen) {
-        label = lbl(effective);
-        tone = 'warn';
-      } else if (p1Active && p1Leaning) {
-        // P1 已失效但请求仍由原配置兜着走（全熔断降级）——不能显示成"健康 P1"
-        label = 'P1';
-        tone = 'warn';
       } else {
         label = lbl(effective);
-        // 不在 P1 就是在用后备路由（P1 槽 = -1；静态模式下 P1 = 队列第一条）
-        tone = p1Active ? 'ok' : 'warn';
+        tone = effHealth.tone;
       }
 
       const routeOf = (idx) => {
@@ -1323,7 +1439,7 @@ window.__ModuleLoader__.load({
           'button',
           {
             onClick: () => setOpen((v) => !v),
-            title: t('failoverTitle'),
+            title: `${t('failoverTitle')} · ${lbl(effective)} ${effHealth.text}${effHealth.detail ? ` · ${effHealth.detail}` : ''}`,
             'aria-label': t('failoverTitle'),
             style: {
               position: 'relative',
@@ -1389,7 +1505,22 @@ window.__ModuleLoader__.load({
                   ? h(Badge, { tone: 'muted' }, t('badgeDisabled'))
                   : allOpen
                     ? h(Badge, { tone: 'error' }, t('badgeAllTripped'))
-                    : h(Badge, { tone: p1Active ? 'ok' : 'warn' }, t('badgeCurrent', { label: lbl(effective) })),
+                    : h(Badge, { tone: effHealth.tone }, t('badgeCurrent', { label: lbl(effective) })),
+              ),
+              // 颜色图例：颜色曾被误读（琥珀=付费被当成"模型有问题"、离开 P1 也被画成黄），
+              // 这里把颜色的唯一含义写死，省得再猜。
+              h(
+                'div',
+                {
+                  style: {
+                    padding: '5px 14px',
+                    fontSize: 10,
+                    lineHeight: '15px',
+                    color: 'var(--dsw-alias-label-secondary)',
+                    borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
+                  },
+                },
+                t('legendHealth'),
               ),
               // 切换结果反馈条：点完立刻能看到"到底切没切"
               flash
@@ -1466,7 +1597,7 @@ window.__ModuleLoader__.load({
                   p1Active
                     ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, t('currentTag'))
                     : null,
-                  h(Badge, { tone: entryTone(p1Entry) || 'ok' }, entryText(p1Entry) || t('stateOk')),
+                  healthBadge(p1Entry, snap, now) || h(Badge, { tone: 'muted' }, t('stateOk')),
                   circuitInfoIcon(p1Entry, snap),
                   ),
                 ...(entries.length === 0
@@ -1499,7 +1630,7 @@ window.__ModuleLoader__.load({
                         isActive
                           ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, t('currentTag'))
                           : null,
-                        h(Badge, { tone: entryTone(e) || 'muted' }, entryText(e) || e.state),
+                        healthBadge(e, snap, Date.now()),
                         circuitInfoIcon(e, snap),
                       );
                     })),

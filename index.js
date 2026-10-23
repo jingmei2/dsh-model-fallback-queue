@@ -48,8 +48,16 @@ const DEFAULT_CONFIG = {
   cooldownMs: 60_000,
   failbackMode: 'sticky', // 'sticky' | 'probe' | 'manual'
   failbackDelayMs: 5 * 60_000, // probe 模式防抖
-  pingIntervalMs: 0, // 周期全员 ping 间隔（ms）；0 = 关闭（F4）
-  pingSkipPaid: true, // 周期扫描跳过 paid 条目，省配额（F4）
+  // 周期全员 ping 间隔（ms）；0 = 关闭。
+  // 默认 60s 打开：没有周期探测时，UI 里的"健康"只能反映上一次真实请求的结果，
+  // 而空闲路由可能早就死了（key 失效/模型下架）却一直显示正常——没有前瞻性。
+  // 探测发的是 maxTokens=1 的微型请求，且默认跳过付费条目（pingSkipPaid），成本可控。
+  pingIntervalMs: 60_000,
+  pingSkipPaid: true, // 周期扫描跳过 paid 条目，省配额
+  // 一次性迁移标记：老版本默认 0（关闭），而 settings 会把默认值也落盘，
+  // 所以「0」既可能是"用户故意关掉"也可能是"从没设置过"。升级时用这个键把关一次，
+  // 之后用户把间隔改回 0 就永久尊重，不再自动改。
+  pingDefaultsMigrated: false,
 };
 
 /** settings 里不允许出现的键：queue 已迁到 state 文件 */
@@ -279,6 +287,11 @@ function createRouter(config, log) {
         state: CIRCUIT.CLOSED, failures: 0, openedAt: 0, lastAttemptAt: 0,
         // 最近一次失败的原因：熔断后 UI 的 ⓘ 悬浮提示要直接展示上游原文
         lastCode: null, lastMessage: '', retryAfterMs: 0, lastSource: null,
+        // 健康证据（前瞻性）：最近一次"真的能回话"的时刻与探测耗时。
+        // lastOkAt 同时被真实请求成功与探测成功刷新；lastProbeAt/probeLatencyMs/probeOk
+        // 只由主动探测写入。UI 靠它们区分「刚测过·820ms」「很久没测过」「上次探测失败」，
+        // 而不是只凭熔断状态猜——熔断是事后记账，本身没有预测能力。
+        lastOkAt: 0, lastProbeAt: 0, probeLatencyMs: 0, probeOk: null,
       };
       circuits.set(key, c);
     }
@@ -332,6 +345,7 @@ function createRouter(config, log) {
    */
   function recordFailure(route, code, message, retryAfterMs, status) {
     const c = circuitOf(keyOf(route));
+    c.lastAttemptAt = Date.now();
     const source = classifyFailureSource(code, message, status, config.immediateCodes);
     stampFailure(c, code, message, retryAfterMs, source);
     if (source === FAILURE_SOURCE.CALLER) {
@@ -356,6 +370,10 @@ function createRouter(config, log) {
     c.state = CIRCUIT.CLOSED;
     c.failures = 0;
     c.halfOpenAt = 0;
+    // 真实请求成功也是一条健康证据：UI 的"上次可用"要把它算进去，
+    // 否则一条一直在正常服务、只是没被探测的路由会显示"未测过"。
+    c.lastOkAt = Date.now();
+    c.lastAttemptAt = Date.now();
     // 恢复正常后清掉旧账：否则下次熔断前若没拿到新原因，悬浮提示会展示早已过期的报错
     c.lastCode = null;
     c.lastMessage = '';
@@ -663,6 +681,12 @@ function createRouter(config, log) {
           // 预计恢复 = 熔断时刻 + 冷却时长；half_open 之后就不再是"等冷却"了
           recoverAt: c.state === CIRCUIT.OPEN ? c.openedAt + config.cooldownMs : null,
           retryAfterMs: c.retryAfterMs || null,
+          // 健康证据（前端据此画"绿/黄/灰"与"x 秒前可用"）：熔断状态是事后结果，
+          // 这三个时间戳才是"多久以前确认过它还能回话"。
+          lastOkAt: c.lastOkAt || null,
+          lastProbeAt: c.lastProbeAt || null,
+          probeLatencyMs: c.probeLatencyMs || null,
+          probeOk: c.probeOk === null || c.probeOk === undefined ? null : c.probeOk === true,
         };
       };
       return {
@@ -692,6 +716,10 @@ function createRouter(config, log) {
         revision: runtime.revision,
         // 冷却时长给 UI：悬浮提示要用它把 openedAt 换算成"预计恢复"的时刻
         cooldownMs: config.cooldownMs,
+        // 探测节奏给 UI：前端据此判断"这条多久没被确认过"是否已经超过一个周期，
+        // 超了就降级成灰色（未验证），不再冒充绿色可用。
+        pingIntervalMs: Number(config.pingIntervalMs) || 0,
+        pingSkipPaid: config.pingSkipPaid !== false,
         entries: queue.map((r, i) => ({
           index: i,
           provider: r.provider,
@@ -800,6 +828,13 @@ class FallbackQueueService extends TypertRemoteService {
     // from === i 是空操作（已经在 P1 又点了一次）：不记历史，否则出现"P1 → P1"
     if (from !== i) this.router.runtime.lastSwitch = { from, to: i, code: 'MANUAL', at: Date.now() };
     this.router.touch();
+    // 切过去立刻探一次目标路由：颜色必须马上有"刚确认过"的证据。
+    // 不探的话，切到一条从没被用过的路由会先显示灰色（未验证），要等一个 60s 周期
+    // 才有数据——用户那边的观感仍然是"颜色对不上、还不如不显示"。
+    if (i >= 0) {
+      const route = this.config.queue?.[i];
+      if (route) void serviceBridge?.probeRoute?.(route);
+    }
     return { ok: true };
   }
 
@@ -916,6 +951,22 @@ export function apply(ctx, llm) {
 
   const router = createRouter(config, ctx);
 
+  /**
+   * 一次性迁移：把周期探测的默认值从 0（关闭）升到 60s。
+   * 为什么需要迁移而不是只改 DEFAULT_CONFIG：settings 文档会把 schema 默认值一并落盘，
+   * 存量用户文档里已经写着 `pingIntervalMs: 0`，只改默认值永远轮不到生效。
+   * 用 pingDefaultsMigrated 把关一次：已经是正数的用户不动它；迁移后用户再改回 0 就永久尊重。
+   */
+  async function migratePingDefaults() {
+    if (config.pingDefaultsMigrated === true) return;
+    const patch = { pingDefaultsMigrated: true };
+    if (!(Number(config.pingIntervalMs) > 0)) patch.pingIntervalMs = DEFAULT_CONFIG.pingIntervalMs;
+    Object.assign(config, patch);
+    await saveSettings(patch);
+    schedulePing();
+    ctx.logger?.info?.('[fallback-queue] ping defaults migrated → interval=%sms', config.pingIntervalMs);
+  }
+
   // ---- 路由预检：启动时 + 适配器拓扑变化时，核对队列里的 provider 是否真的存在 ----
   // 没有这一步时，"provider 被卸载/改名/模型下架"只能等请求撞上 NO_ADAPTER、熔断
   // 计数走完才被发现；预检在装配期就判死并切走。llm 服务缺失（旧宿主/单测环境）
@@ -985,6 +1036,17 @@ export function apply(ctx, llm) {
   async function probeOne(route) {
     // 单条路由的微型探测，无锁（调用方负责串行化）。返回是否可用，并写进电路。
     const key = router.keyOf(route);
+    const startedAt = Date.now();
+    // 探测结果无条件记账（无论成败）：UI 要能说"12 秒前测过、890ms、可用"，
+    // 只留熔断状态的话，一条刚刚测活的路由仍然显示得跟从未探测过一样。
+    const stampProbe = (ok) => {
+      const c = circuitOf(key);
+      c.lastProbeAt = Date.now();
+      c.probeLatencyMs = Date.now() - startedAt;
+      c.probeOk = ok;
+      c.lastAttemptAt = Date.now();
+      if (ok) c.lastOkAt = Date.now();
+    };
     ctx.logger?.info?.('[fallback-queue] probing route %s/%s', route.provider, route.model);
     try {
       const stream = llm.stream({
@@ -1000,11 +1062,13 @@ export function apply(ctx, llm) {
         new Promise((_, rej) => setTimeout(() => rej(new Error('probe timeout')), 15_000)),
       ]);
       router.recordSuccess(route);
+      stampProbe(true);
       ctx.logger?.info?.('[fallback-queue] probe ok: %s', key);
       try { await stream.interrupt?.(); } catch { /* 流可能已结束 */ }
       return true;
     } catch (e) {
       router.recordFailure(route, e?.code || 'UNKNOWN', e?.message, undefined, e?.status);
+      stampProbe(false);
       ctx.logger?.info?.('[fallback-queue] probe failed: %s code=%s', key, e?.code);
       return false;
     }
@@ -1269,11 +1333,13 @@ export function apply(ctx, llm) {
     void (async () => {
       const legacyQueue = await loadSettings();
       await loadQueue(legacyQueue);
+      // 设置加载完之后再做一次性默认值迁移（依赖已落盘的配置值判断"是否从未设置过"）
+      await migratePingDefaults();
     })().catch((e) => ctx.logger?.warn?.('[fallback-queue] boot load failed: %s', e?.message));
   });
 
   // ---- 运行态 RPC 服务 ----
-  serviceBridge = { router, config, saveSettings, saveQueue, probeAllRoutes };
+  serviceBridge = { router, config, saveSettings, saveQueue, probeAllRoutes, probeRoute };
   ctx.effect(() => ctx.plugin(FallbackQueueService), 'fallback-queue rpc service');
   ctx.effect(() => () => {
     serviceBridge = null;
@@ -1304,4 +1370,5 @@ export const Config = s.object({
   failbackDelayMs: s.number().default(DEFAULT_CONFIG.failbackDelayMs).description('探测回切防抖毫秒').volatile(),
   pingIntervalMs: s.number().default(DEFAULT_CONFIG.pingIntervalMs).description('周期全员 ping 间隔毫秒（0=关闭）').volatile(),
   pingSkipPaid: s.boolean().default(DEFAULT_CONFIG.pingSkipPaid).description('周期扫描跳过付费条目（省配额）').volatile(),
+  pingDefaultsMigrated: s.boolean().default(DEFAULT_CONFIG.pingDefaultsMigrated).description('内部：周期探测默认值已完成一次性升级').volatile(),
 });

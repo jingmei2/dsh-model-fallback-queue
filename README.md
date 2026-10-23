@@ -27,8 +27,9 @@
 - **界面中英双语**：所有界面文案跟随 DSH 的语言设置，自动在中文 / English 之间切换。
 - **厂商勾选批量添加**：模型选择器按厂商分组，复选框一次勾选多个，批量入队（按「先厂商、后组内序」追加；已入队的自动防重复）。
 - **大保底置顶（pinned）**：给某个模型打上📌「大保底」标记，无论怎么排序它都恒在队尾（最后兜底），P1 槽不受影响。
-- **免费/付费标记**：入口行手动标记免费（绿）或付费（琥珀），芯片与设置页同步显示；仅作标注辅助，不参与排序、不自动判定。
-- **快速探测（ping）**：一键探测队列里所有模型可用性，可配周期健康探测（默认关；付费模型默认跳过省配额）。
+- **免费/付费标记**：入口行手动标记免费或付费，芯片与设置页同步显示（中性文字标签，不占用颜色）；仅作标注辅助，不参与排序、不自动判定。
+- **健康色与前瞻**：颜色只表示健康——绿＝刚确认可用、黄＝风险/待确认、红＝熔断、灰＝未验证；行尾带「探测 820ms · 12s前」这类证据时间，周期探测默认每 60 秒确认一次。
+- **快速探测（ping）**：一键探测队列里所有模型可用性；周期健康探测默认 60 秒一次（付费模型默认跳过省配额，改回 0 可关闭）。
 - **面板直接点选切换**：点芯片面板里的任意一行，立即把生效路由切到该模型（不用等它故障）；P1 行在已生效时点击会打开宿主的模型选择器——P1 的身份就是当前会话模型，只有宿主能改。
 
 ### 效果图
@@ -111,9 +112,9 @@ dsh plugin --profile web add dsh-model-fallback-queue
 
 **② 大保底置顶（F2）**：队列每一行都有📌按钮。给某行打上「大保底」后，它在切换候选序里**恒排最后**（最后兜底）——不管你怎么用↑/↓调整其余行的顺序，大保底总在队尾；P1 槽（当前会话模型）不受影响，不能被打到大保底。允许多个大保底，彼此仍按物理序顺延；全部打上大保底时退化为原顺序，安全。
 
-**③ 免费/付费标记（F3）**：行内按钮在「未标注 → 免费 → 付费 → 未标注」间轮转；免费显示绿色标签、付费显示琥珀色标签、未标注不显示。芯片面板同步显示。该标注只做展示辅助，**不参与排序、不做自动判定**（没有可靠的免费/付费数据源，不猜）。
+**③ 免费/付费标记（F3）**：行内按钮在「未标注 → 免费 → 付费 → 未标注」间轮转；标签为中性文字（不占用颜色通道——颜色专供健康状态），未标注不显示。芯片面板同步显示。该标注只做展示辅助，**不参与排序、不做自动判定**（没有可靠的免费/付费数据源，不猜）。
 
-**④ 快速探测 ping（F4）**：设置页排队按钮旁的「探测全部」一键并发（串行请求）探测队列里所有模型可用性，结束后提示「可用 N / 不可用 M」；芯片面板也有同款按钮。设置页下方可配**周期健康探测**：`周期探测间隔`（毫秒，0＝关闭，默认关）＋ `周期探测跳过付费模型`（默认开，省配额）。⚠ 周期探测会向模型发真实请求，可能消耗配额/费用。
+**④ 快速探测 ping（F4）**：设置页排队按钮旁的「探测全部」一键并发（串行请求）探测队列里所有模型可用性，结束后提示「可用 N / 不可用 M」；芯片面板也有同款按钮。设置页下方可配**周期健康探测**：`周期探测间隔`（毫秒，0＝关闭，默认 60000＝每 60 秒一次；存量设置会一次性从 0 升到 60000，之后改回 0 永久生效）＋ `周期探测跳过付费模型`（默认开，省配额）。⚠ 周期探测会向模型发真实请求，可能消耗配额/费用。
 
 ### 许可证
 
@@ -136,8 +137,9 @@ When your current model hits its quota, gets rate-limited or becomes unavailable
 - **Bilingual UI.** Every label follows the DSH language setting and switches between 中文 and English automatically.
 - **Batch vendor-based adding.** The model picker groups by vendor; check a box per vendor, tick several, and add them all at once (appended vendor-by-vendor then in-group display order; entries already in the queue are greyed out and never re-added).
 - **Pin as last resort (📌).** Mark any row as a “safety net” and it always stays at the tail of the failover order, no matter how you reorder the rest; the P1 slot is unaffected. Multiple pins keep their relative order; pinning everything just falls back to the natural order.
-- **Free/paid marks.** Toggle each entry 未标注 → free (green) → paid (amber). Shown in both the settings rows and the chip panel; purely a visual aid — never used for sorting or guessed automatically.
-- **Fast ping probe.** One click probes every queue model for availability (serial, ~1 token each); optional periodic health probing (off by default; paid models skipped by default to save quota/cost).
+- **Free/paid marks.** Toggle each entry 未标注 → free → paid. Shown in both the settings rows and the chip panel as neutral text tags (colour is reserved for health); purely a visual aid — never used for sorting or guessed automatically.
+- **Health colour + foresight.** Colour means health only: green = just confirmed working, amber = risk/pending, red = tripped, grey = unverified. Rows carry evidence such as “probe 820ms · 12s ago”, and periodic probing confirms every model every 60s by default.
+- **Fast ping probe.** One click probes every queue model for availability (serial, ~1 token each); periodic health probing runs every 60s by default (paid models skipped to save quota/cost; set the interval to 0 to turn it off).
 - **Click-to-switch in the panel.** Click any row in the chip panel to route the active traffic to that model immediately — no failure required. Clicking the P1 row while it is active opens the host's model picker, because P1 *is* the current session model and only the host can change it.
 
 ### Screenshots
@@ -220,9 +222,9 @@ That file is plugin-private data and is **outside the Settings UI's config expor
 
 **② Pin as last resort (F2).** Each queue row has a 📌 button. Pinning a row forces it to the **tail** of the failover candidate order (last resort) regardless of ↑/↓ moves on the other rows; the P1 slot (current session model) can't be pinned and stays first. Multiple pins keep their relative order; pinning everything degrades safely to the original order.
 
-**③ Free/paid marks (F3).** The row button cycles 未标注 → free → paid → 未标注; free shows a green tag, paid an amber tag, unknown none. The chip panel mirrors the tags. Purely a display aid — never used for ordering or auto-detected (there is no reliable source, so it never guesses).
+**③ Free/paid marks (F3).** The row button cycles 未标注 → free → paid → 未标注; tags are neutral text (colour is reserved for health), unknown shows none. The chip panel mirrors the tags. Purely a display aid — never used for ordering or auto-detected (there is no reliable source, so it never guesses).
 
-**④ Fast ping probe (F4).** The “Probe all” button (in the settings page next to the queue, and in the chip panel) pings every queue model serially and reports “N ok / M unavailable”. Below the queue, periodic health probing can be enabled via **probe interval (ms, 0 = off, default off)** and **skip paid models in periodic probes** (default on, saves quota). ⚠ Periodic probing sends real requests to models and can consume quota/cost.
+**④ Fast ping probe (F4).** The “Probe all” button (in the settings page next to the queue, and in the chip panel) pings every queue model serially and reports “N ok / M unavailable”. Below the queue, periodic health probing can be enabled via **probe interval (ms, 0 = off, default 60000 = once a minute; existing configs are migrated from 0 once)** and **skip paid models in periodic probes** (default on, saves quota). ⚠ Periodic probing sends real requests to models and can consume quota/cost.
 
 ### License
 

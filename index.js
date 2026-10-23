@@ -221,6 +221,15 @@ function createRouter(config, log) {
     lastSwitch: null, // { from, to, code, at }
     revision: 0, // 状态版本号，客户端据此判断是否需要重新拉 snapshot
     probeInFlight: false,
+    // 手动切换的「验证回执」：{ index, state:'pending'|'ok'|'fail', latencyMs, code,
+    // message, at, source:'probe'|'request' }。
+    // 为什么必须有它：manualFailback 只改游标，返回 ok 只证明「游标动了」，不证明
+    // 「这条模型真的能回话」。用户报「至今无法确定是否切换成功」缺的就是这条回执。
+    lastVerify: null,
+    // 宿主的"实际使用"回执：{ index, provider, model, at }。
+    // 来源是宿主把我们的覆盖投影回 session/event model/selection —— 这是唯一
+    // 不依赖我们自己记账的确认信号。有它才能说"这次真的走的是 P3"。
+    hostConfirmed: null,
   };
   // ---- 会话隔离的实际路由（inFlight）----
   // inFlightIndex 与游标同理是会话体验：会话1在 P3、会话2在 P2 时，全局单值会让
@@ -629,6 +638,21 @@ function createRouter(config, log) {
       // 挂掉的这条，同样切不出去。
       setCursor(sessionId, pos);
       recordFailure(failedRoute, code, failure?.message, failure?.providerRetryAfterMs, failure?.status);
+      // 手动意图随失败失效：用户手选的那条挂了，manualIndex 必须清掉，否则新会话
+      // （或游标被清空之后）会继续回落到这条已经判死的路由，表现成"切走了又自己跳回去"。
+      if (runtime.manualIndex === pos) runtime.manualIndex = null;
+      // 真实请求失败是比探测更强的证据：把「手动切换已验证通过」改判为失败，
+      // 否则 UI 会一直挂着一条已经被真实请求打脸的"验证通过"。
+      if (runtime.lastVerify && runtime.lastVerify.index === pos && runtime.lastVerify.state !== 'fail') {
+        runtime.lastVerify = {
+          ...runtime.lastVerify,
+          state: 'fail',
+          code: code || 'UNKNOWN',
+          message: normalizeReason(failure?.message) || runtime.lastVerify.message || null,
+          at: Date.now(),
+          source: 'request', // 区别于探测：这是真实对话请求失败
+        };
+      }
       const nextIdx = this.resolveIndex(Date.now(), sessionId);
       if (nextIdx === -1) {
         // p1Follow 下 -1 有两种可能：绕回 P1 槽（会话模型，这也是一次真切换，UI 要跟着动），
@@ -713,6 +737,13 @@ function createRouter(config, log) {
           ? { provider: sessionModel.provider, model: sessionModel.model, ...view(sessionModel) }
           : null,
         lastSwitch: runtime.lastSwitch,
+        // 手动切换的验证回执（pending/ok/fail + 耗时 + 错误码）。
+        // UI 靠它回答「到底切成功没有」——没有它，切换成功只是一个游标移动。
+        lastVerify: runtime.lastVerify ? { ...runtime.lastVerify } : null,
+        // 宿主确认的"最近一轮实际使用的路由"（来自宿主回写的 model/selection），
+        // 与 lastVerify（探测能否回话）是两条独立证据：一条证明"真的发到了这条"，
+        // 一条证明"这条当时能回话"。
+        hostConfirmed: runtime.hostConfirmed ? { ...runtime.hostConfirmed } : null,
         revision: runtime.revision,
         // 冷却时长给 UI：悬浮提示要用它把 openedAt 换算成"预计恢复"的时刻
         cooldownMs: config.cooldownMs,
@@ -827,15 +858,22 @@ class FallbackQueueService extends TypertRemoteService {
     this.router.resetSessionInFlight(i);
     // from === i 是空操作（已经在 P1 又点了一次）：不记历史，否则出现"P1 → P1"
     if (from !== i) this.router.runtime.lastSwitch = { from, to: i, code: 'MANUAL', at: Date.now() };
+    // 旧实现「切换成功」只证明游标动了：它先返回 {ok:true}，验证靠 void 丢出去的
+    // 探测，而探测在锁忙时静默 return —— 于是切到一条死模型，UI 照样打勾。
+    // 现在切成「立刻返回 pending + 真去验证 + 回执写进 runtime」，UI 据此给结论。
+    r.lastVerify = { index: i, state: 'pending', latencyMs: null, code: null, message: null, at: Date.now(), source: 'probe' };
     this.router.touch();
-    // 切过去立刻探一次目标路由：颜色必须马上有"刚确认过"的证据。
-    // 不探的话，切到一条从没被用过的路由会先显示灰色（未验证），要等一个 60s 周期
-    // 才有数据——用户那边的观感仍然是"颜色对不上、还不如不显示"。
     if (i >= 0) {
       const route = this.config.queue?.[i];
-      if (route) void serviceBridge?.probeRoute?.(route);
+      // 不 await：RPC 立即返回（UI 先显示"验证中"），验证结果下一轮快照带回来。
+      if (route) void serviceBridge?.verifyRoute?.(route, i);
+    } else {
+      // P1 槽（会话模型，不在队列里）：同样要验证，否则"切回 P1"永远没有结论。
+      const sm = this.router.sessionModelFor(null);
+      if (sm?.provider && sm?.model) void serviceBridge?.verifyRoute?.(sm, -1);
+      else r.lastVerify = { ...r.lastVerify, state: 'fail', code: 'NO_SESSION_MODEL', message: '尚未获得会话模型，无法验证 P1' };
     }
-    return { ok: true };
+    return { ok: true, verify: this.router.runtime.lastVerify };
   }
 
   /** 读当前队列顺序（来自 state 文件，非 settings） */
@@ -1000,10 +1038,21 @@ export function apply(ctx, llm) {
       if (!d.provider || !d.model) return;
       // 忽略"我们自己的覆盖被投影回来"的 selection：那是后备路由在跑，不是用户手选。
       // 不忽略的话，每次熔断切到 P2/P3，宿主投影回写都会把 P1 的"本尊"改成后备模型。
+      // 但这条投影本身是**宿主的确认**：宿主把我们返回的 provider/model 写进了会话，
+      // 等于官方承认"本轮用的是它"。所以不拿它改 P1 身份，但要记成回执。
       const forced = router.runtime.lastProposal;
       if (forced?.overridden && forced.idx >= 0) {
         const q = (config.queue || [])[forced.idx];
-        if (q && q.provider === d.provider && q.model === d.model) return;
+        if (q && q.provider === d.provider && q.model === d.model) {
+          router.runtime.hostConfirmed = {
+            index: forced.idx,
+            provider: d.provider,
+            model: d.model,
+            at: Date.now(),
+          };
+          router.touch();
+          return;
+        }
       }
       const sessionId = session?.id ?? null;
       router.noteSessionModel(sessionId, d.provider, d.model);
@@ -1080,6 +1129,62 @@ export function apply(ctx, llm) {
     probing = true;
     try {
       return await probeOne(route);
+    } finally {
+      probing = false;
+    }
+  }
+  /**
+   * 手动切换的「验证」入口：与 probeRoute 的关键差别是**绝不静默跳过**。
+   * probeRoute 在锁被占用时直接 return undefined，调用方拿不到任何结论——这正是
+   * 「切了但不知道成不成」的根源。这里等锁（最多 25s），超时也给出明确回执
+   * （BUSY 而不是空白），保证每次手动切换都有结论。
+   * @param {object} route 目标路由
+   * @param {number} index 目标位置（-1 = P1 槽），写进回执供 UI 对号入座
+   */
+  async function verifyRoute(route, index) {
+    const key = router.keyOf(route);
+    const settle = (state, extra = {}) => {
+      router.runtime.lastVerify = {
+        index,
+        provider: route.provider,
+        model: route.model,
+        state,
+        latencyMs: extra.latencyMs ?? null,
+        code: extra.code ?? null,
+        message: extra.message ?? null,
+        at: Date.now(),
+        source: 'probe',
+      };
+      router.touch();
+      return router.runtime.lastVerify;
+    };
+    if (!llm?.stream) return settle('fail', { code: 'NO_LLM', message: '宿主没有提供 llm.stream，无法验证' });
+    // 等锁：周期探测/全员 ping 正在跑时不抢，但也绝不无声放弃
+    const deadline = Date.now() + 25_000;
+    while ((probing || probingAll) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    if (probing || probingAll) {
+      return settle('fail', { code: 'BUSY', message: '探测锁被占用超过 25s，本次切换未获验证' });
+    }
+    probing = true;
+    const startedAt = Date.now();
+    try {
+      const ok = await probeOne(route);
+      const latencyMs = Date.now() - startedAt;
+      if (ok) {
+        ctx.logger?.info?.('[fallback-queue] manual switch verified: %s in %dms', key, latencyMs);
+        return settle('ok', { latencyMs });
+      }
+      const c = router.circuits.get(key);
+      ctx.logger?.info?.('[fallback-queue] manual switch NOT verified: %s code=%s', key, c?.lastCode);
+      return settle('fail', {
+        latencyMs,
+        code: c?.lastCode || 'UNKNOWN',
+        message: normalizeReason(c?.lastMessage) || null,
+      });
+    } catch (e) {
+      return settle('fail', { latencyMs: Date.now() - startedAt, code: e?.code || 'UNKNOWN', message: e?.message || null });
     } finally {
       probing = false;
     }
@@ -1339,7 +1444,7 @@ export function apply(ctx, llm) {
   });
 
   // ---- 运行态 RPC 服务 ----
-  serviceBridge = { router, config, saveSettings, saveQueue, probeAllRoutes, probeRoute };
+  serviceBridge = { router, config, saveSettings, saveQueue, probeAllRoutes, probeRoute, verifyRoute };
   ctx.effect(() => ctx.plugin(FallbackQueueService), 'fallback-queue rpc service');
   ctx.effect(() => () => {
     serviceBridge = null;

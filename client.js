@@ -111,6 +111,18 @@ window.__ModuleLoader__.load({
         clickToSwitch: '点击切换到 {label}',
         flashSwitched: '已切换到 {label}',
         flashSwitchFailed: '切换失败：{label} 当前不可用',
+        // 切换验证回执：切换成功 ≠ 这条模型能回话，必须分开说
+        flashSwitching: '已切到 {label}，正在验证这条模型能否回话…',
+        verifyOk: '验证通过 · {ms}ms 内回话',
+        verifyFail: '验证失败 · {code}',
+        verifyFailMsg: '验证失败 · {code}（{msg}）',
+        verifyPending: '验证中…',
+        verifyRequestFailed: '真实请求失败 · {code}',
+        verifyBusy: '未获验证（探测锁被占用）',
+        saveFailed: '保存失败：{err}',
+        settingsDefault: '配置暂时读不到，下面显示的是默认值',
+        hostConfirmed: '宿主确认本轮实际使用：{name} · {ago}前',
+        hostNotConfirmed: '本轮还没有宿主确认（发一条消息后这里会变成实证）',
         p1PickModel: '点击更换当前会话模型（即 P1）',
         switchBtn: '切换',
         switchThisRow: '立即把生效路由切到这一条（不用等它故障）',
@@ -237,6 +249,17 @@ window.__ModuleLoader__.load({
         clickToSwitch: 'Click to switch to {label}',
         flashSwitched: 'Switched to {label}',
         flashSwitchFailed: 'Switch failed: {label} unavailable',
+        flashSwitching: 'Switched to {label} — checking whether this model answers…',
+        verifyOk: 'Verified · answered in {ms}ms',
+        verifyFail: 'Not verified · {code}',
+        verifyFailMsg: 'Not verified · {code} ({msg})',
+        verifyPending: 'Checking…',
+        verifyRequestFailed: 'Real request failed · {code}',
+        verifyBusy: 'Not verified (probe lock busy)',
+        saveFailed: 'Save failed: {err}',
+        settingsDefault: 'Config not readable right now — defaults shown below',
+        hostConfirmed: 'Host confirmed this turn ran on: {name} · {ago} ago',
+        hostNotConfirmed: 'No host confirmation yet — send one message and this turns into evidence',
         p1PickModel: 'Click to change the session model (P1)',
         switchBtn: 'Switch',
         switchThisRow: 'Make this route active right now (no need to wait for a failure)',
@@ -792,6 +815,27 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 手动切换的验证回执 → 一行人类可读的结论。
+     * 这是「切换到底成不成」的唯一权威答案：切换本身只动游标，验证才证明能回话。
+     * @returns {{tone:string,text:string}|null}
+     */
+    function verifyText(v) {
+      if (!v) return null;
+      if (v.state === 'pending') return { tone: 'warn', text: t('verifyPending') };
+      if (v.code === 'BUSY') return { tone: 'warn', text: t('verifyBusy') };
+      if (v.state === 'ok') {
+        const ms = Number.isFinite(v.latencyMs) ? v.latencyMs : null;
+        return { tone: 'ok', text: ms === null ? t('healthOk') : t('verifyOk', { ms }) };
+      }
+      const code = v.code || 'UNKNOWN';
+      if (v.source === 'request') return { tone: 'error', text: t('verifyRequestFailed', { code }) };
+      return {
+        tone: 'error',
+        text: v.message ? t('verifyFailMsg', { code, msg: v.message }) : t('verifyFail', { code }),
+      };
+    }
+
+    /**
      * 大保底标记（F2）：📌 + 文案 tag；仅 pinned 渲染。
      * @param {boolean|undefined} pinned
      * @returns {object|null}
@@ -810,6 +854,8 @@ window.__ModuleLoader__.load({
       const [cfg, setCfg] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
       const [snap, setSnap] = React.useState(null);
+      // 保存/切换的动作结果：设置页以前把失败吞进 console，用户看到的只是"点了没反应"。
+      const [err, setErr] = React.useState(null);
       const [pickerOpen, setPickerOpen] = React.useState(false);
       const [confirmRemove, setConfirmRemove] = React.useState(null); // 移除确认中的行索引
       // F4 探测全部：进行中 + 结果提示
@@ -825,7 +871,11 @@ window.__ModuleLoader__.load({
       const refresh = React.useCallback(async () => {
         // settings 只出配置；队列来自 state 文件（host.getQueue），两个来源不重叠
         const [s, q] = await Promise.all([host.getSettings(), host.getQueue()]);
-        if (s) setCfg({ enabled: false, queue: [], failbackMode: STICKY, ...s, queue: q || [] });
+        // settings 命名空间还没有文档时 getSettings() 返回 null。旧实现在这里直接
+        // 不 setCfg，页面就永久停在"加载中"——用户报的"设置页打不开/一片空白"。
+        // 现在退回默认值渲染并把原因写在顶部，至少能操作。
+        setCfg({ enabled: false, queue: [], failbackMode: STICKY, ...(s || {}), queue: q || s?.queue || [] });
+        if (!s) setErr(t('settingsDefault'));
         const st = await host.getRuntimeSnapshot();
         if (st) setSnap(st);
       }, [host]);
@@ -838,8 +888,12 @@ window.__ModuleLoader__.load({
 
       const patch = async (p) => {
         setBusy(true);
-        await host.updateSettings(p);
+        const r = await host.updateSettings(p);
         await refresh();
+        // 错误必须在 refresh 之后设置：refresh 会重写 cfg（失败时回到磁盘上的真实值），
+        // 顺带可能写入"配置读不到"的提示，动作失败的原因优先级更高。
+        if (!r?.ok) setErr(t('saveFailed', { err: r?.error || 'unknown' }));
+        else setErr(null);
         setBusy(false);
       };
 
@@ -848,8 +902,10 @@ window.__ModuleLoader__.load({
       // 队列写路径：只落 state 文件，不碰 settings，因此不会触发宿主主题全量重算
       const writeQueue = async (q) => {
         setBusy(true);
-        await host.setQueue(q);
+        const r = await host.setQueue(q);
         await refresh();
+        if (!r?.ok) setErr(t('saveFailed', { err: r?.error || 'unknown' }));
+        else setErr(null);
         setBusy(false);
       };
 
@@ -877,10 +933,17 @@ window.__ModuleLoader__.load({
         await writeQueue(q);
       };
       // 点选切换：把生效路由立刻拉到这一条（队列下标 i；-1=P1 槽由芯片面板负责）
+      // 结果必须可见：失败不能静默（"切了但不知道成不成"正是设置页的老问题）。
       const switchRow = async (i) => {
-        await host.manualFailback(i);
+        setBusy(true);
+        const r = await host.manualFailback(i);
+        const ok = r ? (r.ok === undefined ? true : Boolean(r.ok)) : false;
         const st = await host.getRuntimeSnapshot();
         if (st) setSnap(st);
+        const name = cfg.p1Follow ? `P${i + 2}` : `P${i + 1}`;
+        if (!ok) setErr(t('flashSwitchFailed', { label: name }));
+        else setErr(null);
+        setBusy(false);
       };
       const cyclePaid = async (i) => {
         const order = ['unknown', 'free', 'paid'];
@@ -913,6 +976,24 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { style: { padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 720 } },
+        // 动作结果横幅：保存失败/切换失败/配置读不到都在这里说清楚。
+        // 没有这条，设置页失败的表现就是"点了没反应"或"刷新后弹回去了"。
+        err
+          ? h(
+              'div',
+              {
+                style: {
+                  padding: '8px 10px',
+                  fontSize: 12,
+                  borderRadius: 8,
+                  color: 'var(--dsw-alias-state-error-primary, #c94141)',
+                  border: '1px solid var(--dsw-alias-state-error-primary, #c9414144)',
+                  background: 'var(--dsw-alias-bg-layer-1, transparent)',
+                },
+              },
+              err,
+            )
+          : null,
         // 总开关
         h(
           'div',
@@ -1044,6 +1125,23 @@ window.__ModuleLoader__.load({
             ? h('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } },
                 snap?.probingAll ? t('probingAll', { done: 0, total: cfg.queue.length }) : probeNote)
             : null,
+          // 切换验证回执：设置页的「切换」按钮同样要给出结论，否则切完仍是黑箱。
+          (() => {
+            const v = snap?.lastVerify;
+            const vt = verifyText(v);
+            if (!vt) return null;
+            const name = v.index < 0 ? 'P1'
+              : cfg.p1Follow ? `P${v.index + 2}` : `P${v.index + 1}`;
+            const color = {
+              ok: 'var(--dsw-alias-state-success-primary, #3a9e5f)',
+              warn: 'var(--dsw-alias-state-warn-primary, #c98a1b)',
+              error: 'var(--dsw-alias-state-error-primary, #c94141)',
+              muted: 'var(--dsw-alias-label-secondary, #888)',
+            }[vt.tone];
+            const mark = v.state === 'pending' ? '⏳ ' : v.state === 'ok' ? '✓ ' : '✕ ';
+            return h('div', { style: { fontSize: 11, fontWeight: 600, marginTop: 6, color } },
+              `${mark}${name} · ${vt.text}`);
+          })(),
         ),
         // 回切策略
         h(
@@ -1309,9 +1407,14 @@ window.__ModuleLoader__.load({
           }
           if (!alive) return;
           if (st) setSnap((prev) => (JSON.stringify(prev) === JSON.stringify(st) ? prev : st));
-          // 自适应轮询：稳定时 5s 一次；有请求在飞/刚发生过切换失败、或者弹层正开着时 1s 一次。
-          // 固定 5s 会让"切到 P2 了但指示器还显示 P1"最多僵 5 秒，正是被报的问题。
-          const live = st && (st.inFlightIndex >= 0 || st.entries?.some((e) => e.state !== 'closed'));
+          // 自适应轮询：稳定时 5s 一次；有请求在飞/刚发生过切换失败/验证回执还没落地、
+          // 或者弹层正开着时 1s 一次。固定 5s 会让"切到 P2 了但指示器还显示 P1"最多僵 5 秒，
+          // 也会让"验证中…"多挂 5 秒才给出结论。
+          const live = st && (
+            st.inFlightIndex >= 0
+            || st.entries?.some((e) => e.state !== 'closed')
+            || st.lastVerify?.state === 'pending'
+          );
           timer = setTimeout(tick, live || open ? 1000 : 5000);
         };
         // open 进依赖 = 点开/收起弹层时立刻重跑一次 tick：
@@ -1403,9 +1506,12 @@ window.__ModuleLoader__.load({
         const name = lbl(idx);
         // manualFailback 的失败形态：返回 null（信封 ok:false）或裸值 {ok:false}
         const ok = r ? (r.ok === undefined ? true : Boolean(r.ok)) : false;
-        setFlash({ tone: ok ? 'ok' : 'error', text: ok ? t('flashSwitched', { label: name }) : t('flashSwitchFailed', { label: name }) });
+        // 切换成功只代表「游标动了」；能不能回话由 host 侧验证回执给出。
+        // 所以成功不打勾：紧接着出现的验证行（验证中→结论）才是答案。
+        // 失败要立刻说，因为它连游标都没动。
+        setFlash(ok ? null : { tone: 'error', text: t('flashSwitchFailed', { label: name }) });
         if (flashTimer.current) clearTimeout(flashTimer.current);
-        flashTimer.current = setTimeout(() => setFlash(null), 2600);
+        if (!ok) flashTimer.current = setTimeout(() => setFlash(null), 5000);
       };
       const failback = () => switchTo(-1);
       // P1 在 p1Follow 下就是「当前会话模型」——它的身份只能由宿主改。
@@ -1523,7 +1629,36 @@ window.__ModuleLoader__.load({
                 },
                 t('legendHealth'),
               ),
-              // 切换结果反馈条：点完立刻能看到"到底切没切"
+              // 切换验证回执：这是「到底切成功没有」的唯一结论行。
+              // 切换只动游标，验证才证明这条模型能回话；失败时带上宿主给的错误码，
+              // 用户可以自己判断是额度、鉴权还是模型下架。
+              (() => {
+                const v = snap?.lastVerify;
+                const vt = verifyText(v);
+                if (!vt) return null;
+                const vColor = {
+                  ok: 'var(--dsw-alias-state-success-primary, #3a9e5f)',
+                  warn: 'var(--dsw-alias-state-warn-primary, #c98a1b)',
+                  error: 'var(--dsw-alias-state-error-primary, #c94141)',
+                  muted: 'var(--dsw-alias-label-secondary, #888)',
+                }[vt.tone];
+                const mark = v.state === 'pending' ? '⏳ ' : v.state === 'ok' ? '✓ ' : '✕ ';
+                return h(
+                  'div',
+                  {
+                    style: {
+                      padding: '6px 14px',
+                      fontSize: 11,
+                      fontWeight: 600,
+                      lineHeight: '16px',
+                      color: vColor,
+                      borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
+                    },
+                  },
+                  `${mark}${lbl(v.index)} · ${vt.text}`,
+                );
+              })(),
+              // 切换结果反馈条：只在切换本身失败（游标都没动）时出现
               flash
                 ? h(
                     'div',
@@ -1544,6 +1679,23 @@ window.__ModuleLoader__.load({
                     (flash.tone === 'ok' ? '✓ ' : '✕ ') + flash.text,
                   )
                 : null,
+              // 宿主确认回执：这是「真的发到了这条模型」的唯一实证，来自宿主自己的回写，
+              // 不依赖插件记账。用户问"怎么确定真切了"时，看这一行。
+              (() => {
+                const hc = snap?.hostConfirmed;
+                if (!hc) {
+                  return enabled
+                    ? h('div', { style: { padding: '5px 14px', fontSize: 10, lineHeight: '15px', color: 'var(--dsw-alias-label-secondary)', borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))' } },
+                        t('hostNotConfirmed'))
+                    : null;
+                }
+                const name = `${hc.provider} / ${hc.model}`;
+                return h(
+                  'div',
+                  { style: { padding: '5px 14px', fontSize: 10, lineHeight: '15px', color: 'var(--dsw-alias-label-secondary)', borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))' } },
+                  t('hostConfirmed', { name, ago: fmtAge(Math.max(0, now - hc.at)) }),
+                );
+              })(),
               // 实际在跑的路由：这块是"看报错就知道是谁的锅"的关键——
               // 指示器显示的不是你手选的模型，而是这一轮真实请求发去了哪里。
               h(
@@ -1852,15 +2004,22 @@ window.__ModuleLoader__.load({
               const v = doc?.ok ? doc.value : doc;
               const list = Array.isArray(v) ? v : v?.namespaces;
               const ns = (list || []).find((n) => n.ns === 'dsh-model-fallback-queue');
-              // update 返回 {ok, value} 信封；失败时 warn
+              // update 返回 {ok, value} 信封：**必须把结果带回调用方**。
+              // 旧实现只 console.warn，设置页于是把失败当成功——用户点开关，
+              // 页面刷新后弹回原值，看起来就是"设置页坏了/点了没用"。
               const r = await ctx.remote?.settings?.update?.(
                 'dsh-model-fallback-queue',
                 patch,
                 ns?.revision,
               );
-              if (r && r.ok === false) console.warn('[fallback-queue] update rejected', r.error?.message);
+              if (r && r.ok === false) {
+                console.warn('[fallback-queue] update rejected', r.error?.message);
+                return { ok: false, error: r.error?.message || 'update rejected' };
+              }
+              return { ok: true };
             } catch (e) {
               console.warn('[fallback-queue] update failed', e);
+              return { ok: false, error: e?.message || String(e) };
             }
           },
           // 队列经 host 侧 RPC 读写 state 文件（不走 settings，避免主题全量重算）
@@ -1879,13 +2038,17 @@ window.__ModuleLoader__.load({
           async setQueue(queue) {
             try {
               const remote = rpcFace;
-              if (!remote?.setQueue) return;
+              if (!remote?.setQueue) return { ok: false, error: 'setQueue unavailable' };
               const r = await remote.setQueue(queue);
               if (r && typeof r === 'object' && 'ok' in r && r.ok === false) {
                 console.warn('[fallback-queue] setQueue rejected', r.error?.message);
+                return { ok: false, error: r.error?.message || 'setQueue rejected' };
               }
+              // 信封里带 ok:false 之外，host 侧写盘失败会以 {ok:false} 返回
+              return { ok: true };
             } catch (e) {
               console.warn('[fallback-queue] setQueue failed', e);
+              return { ok: false, error: e?.message || String(e) };
             }
           },
           async getRuntimeSnapshot() {

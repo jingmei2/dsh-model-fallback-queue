@@ -76,8 +76,8 @@ mustMatch('snapshot 暴露 pingIntervalMs', index, /pingIntervalMs: Number\(conf
 mustMatch('snapshot 暴露 pingSkipPaid', index, /pingSkipPaid: config\.pingSkipPaid !== false/);
 mustMatch('默认周期探测为 60s', index, /pingIntervalMs: 60_000/);
 mustMatch('一次性迁移已接线', index, /await migratePingDefaults\(\)/);
-mustMatch('切换后立刻探测目标路由', index, /serviceBridge\?\.probeRoute\?\.\(route\)/);
-mustMatch('probeRoute 已进 bridge', index, /probeAllRoutes, probeRoute \}/);
+mustMatch('切换后立刻验证目标路由', index, /serviceBridge\?\.verifyRoute\?\.\(route, i\)/);
+mustMatch('verifyRoute 已进 bridge', index, /probeAllRoutes, probeRoute, verifyRoute \}/);
 
 // ---------- 4. 双语键齐全 ----------
 const keys = [
@@ -135,6 +135,28 @@ check('探测关闭时 16 分钟前的证据算过期',
   healthOf({ state: 'closed', lastOkAt: now - 16 * 60_000 }, offSnap, now).tone === 'muted');
 check('探测关闭时 10 分钟前的证据仍算可用',
   healthOf({ state: 'closed', lastOkAt: now - 10 * 60_000 }, offSnap, now).tone === 'ok');
+
+// ---- 切换验证回执：切换成功 ≠ 模型能回话 ----
+// 用户的原话是"至今无法确定是否真的切换成功"，所以这里把"必须存在一条独立于
+// 游标移动的结论"钉成断言。
+check('快照下发 lastVerify 回执', /lastVerify:\s*runtime\.lastVerify/.test(index));
+check('manualFailback 返回 verify 字段', /return \{ ok: true, verify: this\.router\.runtime\.lastVerify \}/.test(index));
+mustNotMatch('manualFailback 不再用 void 丢掉验证结果', index, /void serviceBridge\?\.probeRoute\?\.\(route\)/);
+check('存在 verifyRoute 实现', /async function verifyRoute\(route, index\)/.test(index));
+check('verifyRoute 等锁而不是静默跳过', /探测锁被占用超过 25s/.test(index));
+check('验证失败回执会带错误码', /manual switch NOT verified/.test(index));
+check('真实请求失败会推翻"验证通过"', /source: 'request'/.test(index));
+check('手动意图随失败清除', /if \(runtime\.manualIndex === pos\) runtime\.manualIndex = null;/.test(index));
+check('client 有 verifyText 渲染器', /function verifyText\(v\)/.test(client));
+check('芯片面板渲染验证回执', /snap\?\.lastVerify/.test(client));
+check('验证中时加快轮询', /st\.lastVerify\?\.state === 'pending'/.test(client));
+check('设置页上报表单失败', /if \(!r\?\.ok\) setErr\(t\('saveFailed'/.test(client));
+check('设置页不再永久卡在加载中', /\.\.\.\(s \|\| \{\}\)/.test(client));
+
+// ---- 宿主确认回执：唯一不依赖插件自记账的"真的走这条路"证据 ----
+check('宿主回写被记成确认回执', /router\.runtime\.hostConfirmed = \{/.test(index));
+check('快照下发 hostConfirmed', /hostConfirmed: runtime\.hostConfirmed/.test(index));
+check('芯片面板显示宿主确认', /snap\?\.hostConfirmed/.test(client));
 
 if (failures.length) {
   console.error(`✗ ${failures.length} 项失败 / ${pass + failures.length} 项`);

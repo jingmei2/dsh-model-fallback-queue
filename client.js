@@ -1139,10 +1139,16 @@ window.__ModuleLoader__.load({
         && Number.isInteger(snap.sessionInFlight[props.sessionId])
         ? snap.sessionInFlight[props.sessionId]
         : undefined;
+      // 全局手动切换目标：manualFailback 会清空所有会话的 inFlight 记录，此时
+      // sessionInFlight 里没有本会话的条目——但那不是"没切换"，而是"切了、还没发请求"。
+      // 不认这个字段，芯片就会一直写 P1、目标行也不高亮（用户报的「切到 P4 没反应」）。
+      const manualTarget = Number.isInteger(snap?.manualIndex) ? snap.manualIndex : undefined;
       const inFlight = myInFlight !== undefined ? myInFlight
+        : manualTarget !== undefined ? manualTarget
         : hasSessionMap ? -1
         : Number.isInteger(snap?.inFlightIndex) ? snap.inFlightIndex : active;
       const effective = myInFlight !== undefined ? myInFlight
+        : manualTarget !== undefined ? manualTarget
         : hasSessionMap ? -1
         : Number.isInteger(snap?.effectiveIndex) ? snap.effectiveIndex : inFlight;
 

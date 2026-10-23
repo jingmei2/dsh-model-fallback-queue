@@ -204,6 +204,10 @@ function createRouter(config, log) {
   // 运行态
   const runtime = {
     activeIndex: config.p1Follow ? -1 : 0, // 当前生效位置（p1Follow 下 -1 = P1 会话模型）
+    // 全局手动切换目标（manualFailback 写入，null = 没有手动意图）。
+    // 手动切换是明确的全局意图，必须压过"未记录会话回落到 P1"的默认规则，
+    // 否则切换只改显示不改路由：resolveIndex 会照样返回 P1。
+    manualIndex: null,
     inFlightIndex: -1, // 最近一次实际发出去的请求所走的路由；-1 = 未覆盖（放行原配置）
     lastProposal: null, // { key, idx, overridden } 最近一次 agent/request 的提案
     lastSwitch: null, // { from, to, code, at }
@@ -236,9 +240,13 @@ function createRouter(config, log) {
   function cursorFor(sessionId) {
     if (typeof sessionId !== 'string' || !sessionId) return runtime; // 无会话上下文 → 全局回退
     const cur = sessionCursor.get(sessionId);
-    // 未记录的会话一律从 P1 槽起步：新会话不该继承别的会话的切换进度。
+    // 未记录的会话：有全局手动切换意图时跟随它（manualFailback 已清空所有会话游标，
+    // 此时"没有记录"是手动切换的结果，不是新会话）；否则从 P1 槽起步——新会话不该
+    // 继承别的会话因熔断产生的切换进度。
     // 全局 activeIndex 只反映"曾经有会话切过多深"，供探测/预检选起点，不污染新会话。
-    if (cur === undefined) return { activeIndex: p1Position() };
+    if (cur === undefined) return {
+      activeIndex: Number.isInteger(runtime.manualIndex) ? runtime.manualIndex : p1Position(),
+    };
     return { activeIndex: cur }; // 只读视图，写经 setCursor
   }
   function setCursor(sessionId, idx) {
@@ -466,6 +474,9 @@ function createRouter(config, log) {
      * 就是"换了模型但没生效"（P1 行名字也不跟着变）。
      */
     retryFromP1(sessionId) {
+      // 用户手选模型 = 明确要回 P1：清掉之前的手动切换意图，否则下次没记录的会话
+      // 仍会按旧的手动目标走。
+      runtime.manualIndex = null;
       setCursor(sessionId, p1Position());
       setInFlight(sessionId, p1Position());
       runtime.lastProposal = null;
@@ -658,6 +669,9 @@ function createRouter(config, log) {
         enabled: config.enabled,
         p1Follow: config.p1Follow,
         activeIndex: runtime.activeIndex,
+        // 手动切换目标：客户端在"本会话还没有请求记录"时用它显示生效路由，
+        // 修「切到 P4 了但芯片仍写 P1、P4 行不高亮」。
+        manualIndex: runtime.manualIndex,
         inFlightIndex: runtime.inFlightIndex,
         // per-session inFlight 映射随快照下发：客户端按当前会话取自己的显示值，
         // 修「会话1在 P3、会话2在 P2 时芯片互相覆盖」的问题。
@@ -778,6 +792,9 @@ class FallbackQueueService extends TypertRemoteService {
     // 手动回切是明确的全局意图：清掉所有会话游标，全部回到目标位置
     this.router.resetSessionCursors();
     this.router.runtime.activeIndex = i;
+    // 记下全局手动意图：cursorFor() 对"没有会话记录"的会话据此回落，
+    // 否则清空游标后下一个请求又回到 P1，切换只在 UI 上生效。
+    this.router.runtime.manualIndex = i;
     // 手动回切后 UI 立刻应显示目标位置，而不是继续显示上次失败的路由。
     this.router.resetSessionInFlight(i);
     // from === i 是空操作（已经在 P1 又点了一次）：不记历史，否则出现"P1 → P1"

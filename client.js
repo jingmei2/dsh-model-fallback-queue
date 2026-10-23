@@ -761,9 +761,10 @@ window.__ModuleLoader__.load({
       if (e.probeOk === false && probedAt >= okAt) {
         return { tone: 'warn', text: t('healthProbeFailed'), detail: t('healthAgo', { age: fmtAge(age) }) };
       }
-      // 探测周期开着，但已经很久没有任何证据：说明它既没被测过也没被用过
+      // 探测周期开着时，超过 3 个周期（至少 3 分钟）没有新证据就降级成灰色：
+      // 60s 周期下绿色最多"保鲜"3 分钟，探测停摆不会被永远当成健康。
       const interval = Number(snap?.pingIntervalMs) || 0;
-      const staleAfter = interval > 0 ? Math.max(HEALTH_STALE_MS, interval * 3) : HEALTH_STALE_MS;
+      const staleAfter = interval > 0 ? Math.max(interval * 3, 180_000) : HEALTH_STALE_MS;
       if (age > staleAfter) {
         return { tone: 'muted', text: t('healthStale'), detail: t('healthAgo', { age: fmtAge(age) }) };
       }

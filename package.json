@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-fallback-queue",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "模型故障转移队列：P1 限额/限流/不可用时自动切到队列下一个模型继续，全部图形界面配置 | Model fallback queue for DeepSeek Harness: auto-switch to the next model when the current one hits quota or rate limits",
   "type": "module",
   "main": "./index.js",

@@ -110,6 +110,9 @@ window.__ModuleLoader__.load({
         failbackAction: '切回 P1',
         clickToSwitch: '点击切换到 {label}',
         p1PickModel: '点击更换当前会话模型（即 P1）',
+        switchBtn: '切换',
+        switchThisRow: '立即把生效路由切到这一条（不用等它故障）',
+        switchCurrent: '已经在用这一条',
         settings: '设置…',
         slotLabel: '故障转移',
         // 仅用于识别宿主内置「选择模型」按钮（DOM 匹配，不参与渲染）
@@ -215,6 +218,9 @@ window.__ModuleLoader__.load({
         failbackAction: 'Switch back to P1',
         clickToSwitch: 'Click to switch to {label}',
         p1PickModel: 'Click to change the session model (P1)',
+        switchBtn: 'Switch',
+        switchThisRow: 'Make this route active right now (no need to wait for a failure)',
+        switchCurrent: 'Already in use',
         settings: 'Settings…',
         slotLabel: 'Failover',
         selectModelAria: 'Select model',
@@ -758,6 +764,12 @@ window.__ModuleLoader__.load({
         q[i] = { ...q[i], pinned };
         await writeQueue(q);
       };
+      // 点选切换：把生效路由立刻拉到这一条（队列下标 i；-1=P1 槽由芯片面板负责）
+      const switchRow = async (i) => {
+        await host.manualFailback(i);
+        const st = await host.getRuntimeSnapshot();
+        if (st) setSnap(st);
+      };
       const cyclePaid = async (i) => {
         const order = ['unknown', 'free', 'paid'];
         const cur = qValPaid(cfg.queue[i]);
@@ -836,6 +848,20 @@ window.__ModuleLoader__.load({
                       ? h(Badge, { tone: entryTone(entry) }, `${entryText(entry)}${entry.failures ? t('failuresSuffix', { n: entry.failures }) : ''}`)
                       : null,
                     circuitInfoIcon(entry, snap),
+                    // 点选切换：立刻把生效路由拉到这一条（不用等它故障）。
+                    // 芯片面板（输入框旁的 P 按钮）行点击走同一语义，这里给设置页一个显式入口，
+                    // 免得用户以为设置页的队列只能配置、不能切换。
+                    h(
+                      'button',
+                      {
+                        onClick: () => { void switchRow(i); },
+                        disabled: !cfg.enabled || (snap?.effectiveIndex ?? snap?.activeIndex) === i,
+                        title: (snap?.effectiveIndex ?? snap?.activeIndex) === i ? t('switchCurrent') : t('switchThisRow'),
+                        'aria-label': t('switchThisRow'),
+                        style: !cfg.enabled || (snap?.effectiveIndex ?? snap?.activeIndex) === i ? btnSmallDisabled : btnSmall,
+                      },
+                      t('switchBtn'),
+                    ),
                     // F2：大保底 PIN 开关
                     h(
                       'button',

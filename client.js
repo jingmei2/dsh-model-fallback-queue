@@ -109,6 +109,8 @@ window.__ModuleLoader__.load({
         failbackTitle: '把生效路由切回 P1（p1Follow 下即当前会话模型）',
         failbackAction: '切回 P1',
         clickToSwitch: '点击切换到 {label}',
+        flashSwitched: '已切换到 {label}',
+        flashSwitchFailed: '切换失败：{label} 当前不可用',
         p1PickModel: '点击更换当前会话模型（即 P1）',
         switchBtn: '切换',
         switchThisRow: '立即把生效路由切到这一条（不用等它故障）',
@@ -217,6 +219,8 @@ window.__ModuleLoader__.load({
         failbackTitle: 'Switch the active route back to P1 (the current session model under p1Follow)',
         failbackAction: 'Switch back to P1',
         clickToSwitch: 'Click to switch to {label}',
+        flashSwitched: 'Switched to {label}',
+        flashSwitchFailed: 'Switch failed: {label} unavailable',
         p1PickModel: 'Click to change the session model (P1)',
         switchBtn: 'Switch',
         switchThisRow: 'Make this route active right now (no need to wait for a failure)',
@@ -1066,6 +1070,9 @@ window.__ModuleLoader__.load({
       const onOpenSettings = props.onOpenSettings;
       const [snap, setSnap] = React.useState(null);
       const [open, setOpen] = React.useState(false);
+      // 点击切换后的即时反馈：成功与失败都必须可见。旧实现里 manualFailback 失败
+      // 会返回 null 被静默吞掉，用户点完完全不知道发生了什么。
+      const [flash, setFlash] = React.useState(null);
       // DOM 解析到的"当前模型名"与冻结后的"会话模型名"分开：
       // DOM 名跟着宿主按钮走——故障转移后宿主按钮（request/header 投影）会显示
       // 实际路由的模型，盲目跟随会把 P1 行（会话模型）显示成 P3 的模型。
@@ -1074,6 +1081,8 @@ window.__ModuleLoader__.load({
       const [sessionModelLabel, setSessionModelLabel] = React.useState(null); // null = 尚未从 DOM 解析到，语言无关的哨兵（不拿文案当哨兵）
       const [lastUncoveredName, setLastUncoveredName] = React.useState(null);
       const rootRef = React.useRef(null);
+      // 切换反馈的自动消失计时器（点完 2.6s 收掉提示条）
+      const flashTimer = React.useRef(null);
       // DOM 取名函数存一份引用：点开弹层时要立刻重读一次，不能等 3s 轮询。
       const pullLabelRef = React.useRef(null);
 
@@ -1265,9 +1274,15 @@ window.__ModuleLoader__.load({
       // 手动切换：把生效路由直接拉到指定位置（-1 = P1 槽，p1Follow 下即当前会话模型）。
       // 面板行点击走的就是这里；「手动回切」模式下这也是唯一的回去方式。
       const switchTo = async (idx) => {
-        await host.manualFailback(idx);
+        const r = await host.manualFailback(idx);
         const st = await host.getRuntimeSnapshot();
         if (st) setSnap(st);
+        const name = lbl(idx);
+        // manualFailback 的失败形态：返回 null（信封 ok:false）或裸值 {ok:false}
+        const ok = r ? (r.ok === undefined ? true : Boolean(r.ok)) : false;
+        setFlash({ tone: ok ? 'ok' : 'error', text: ok ? t('flashSwitched', { label: name }) : t('flashSwitchFailed', { label: name }) });
+        if (flashTimer.current) clearTimeout(flashTimer.current);
+        flashTimer.current = setTimeout(() => setFlash(null), 2600);
       };
       const failback = () => switchTo(-1);
       // P1 在 p1Follow 下就是「当前会话模型」——它的身份只能由宿主改。
@@ -1370,6 +1385,27 @@ window.__ModuleLoader__.load({
                     ? h(Badge, { tone: 'error' }, t('badgeAllTripped'))
                     : h(Badge, { tone: p1Active ? 'ok' : 'warn' }, t('badgeCurrent', { label: lbl(effective) })),
               ),
+              // 切换结果反馈条：点完立刻能看到"到底切没切"
+              flash
+                ? h(
+                    'div',
+                    {
+                      style: {
+                        padding: '7px 14px',
+                        fontSize: 12,
+                        fontWeight: 600,
+                        color: flash.tone === 'ok'
+                          ? 'var(--dsw-alias-state-success-primary, #3a9e5f)'
+                          : 'var(--dsw-alias-state-error-primary, #c94141)',
+                        borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                      },
+                    },
+                    (flash.tone === 'ok' ? '✓ ' : '✕ ') + flash.text,
+                  )
+                : null,
               // 实际在跑的路由：这块是"看报错就知道是谁的锅"的关键——
               // 指示器显示的不是你手选的模型，而是这一轮真实请求发去了哪里。
               h(

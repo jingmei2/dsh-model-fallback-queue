@@ -62,7 +62,6 @@ mustNotMatch('芯片 tone 不再由 p1Active 决定', client, /tone = p1Active \
 mustMatch('芯片取生效路由条目', client, /const effEntry = effective < 0 \? p1Entry : entries\.find/);
 mustMatch('芯片颜色来自 healthOf', client, /tone = effHealth\.tone/);
 mustMatch('标题徽章颜色也来自 health', client, /h\(Badge, \{ tone: effHealth\.tone \}, t\('badgeCurrent'/);
-mustMatch('面板底部有颜色图例', client, /t\('legendHealth'\)/);
 
 // ---------- 3. 服务端下发前瞻证据 ----------
 mustMatch('探测成功记账', index, /stampProbe\(true\)/);
@@ -76,14 +75,26 @@ mustMatch('snapshot 暴露 pingIntervalMs', index, /pingIntervalMs: Number\(conf
 mustMatch('snapshot 暴露 pingSkipPaid', index, /pingSkipPaid: config\.pingSkipPaid !== false/);
 mustMatch('默认周期探测为 60s', index, /pingIntervalMs: 60_000/);
 mustMatch('一次性迁移已接线', index, /await migratePingDefaults\(\)/);
-mustMatch('切换后立刻验证目标路由', index, /serviceBridge\?\.verifyRoute\?\.\(route, i\)/);
-mustMatch('verifyRoute 已进 bridge', index, /probeAllRoutes, probeRoute, verifyRoute \}/);
+// ---- 切换的真实性：只能由「真实请求」证明，不能由探测伪造 ----
+mustNotMatch('切换时不再发探测（旧实现会写出 NO_SESSION_MODEL 假失败）', index, /verifyRoute/);
+mustMatch('切换只记等待位', index, /r\.pendingConfirm = \{ index: i, at: Date\.now\(\) \}/);
+mustMatch('manualFailback 返回 pending', index, /return \{ ok: true, pending:/);
+mustMatch('快照下发 pendingConfirm', index, /pendingConfirm: runtime\.pendingConfirm/);
+mustMatch('快照下发 lastRequest', index, /lastRequest: runtime\.lastRequest/);
+mustMatch('agent/request 记录真实请求', index, /noteRequest\(idx, route\.provider, route\.model, sessionId\)/);
+mustMatch('真实请求失败改判 lastRequest', index, /state: 'fail',/);
+mustMatch('真实请求成功改判 lastRequest', index, /lr\.state === 'sent'/);
+mustMatch('探测体只用最小字段', index, /messages: \[\{ role: 'user', content: 'ping' \}\]/);
+mustMatch('探测被拒不冒充风险', index, /PROBE_UNSUPPORTED/);
+mustMatch('默认探测不跳过付费', index, /pingSkipPaid: false/);
+mustMatch('跳过付费的旧默认只迁移一次', index, /pingSkipPaidMigrated/);
 
 // ---------- 4. 双语键齐全 ----------
 const keys = [
   'healthOk', 'healthSlow', 'healthProbeFailed', 'healthUnprobed', 'healthUnprobedHint',
   'healthSkipPaidHint', 'healthStale', 'healthAgo', 'healthProbeMs', 'healthVerifying',
-  'healthRecoverIn', 'healthUnknown', 'legendHealth',
+  'healthRecoverIn', 'healthUnknown', 'healthProbeUnsupported',
+  'reqSent', 'reqOk', 'reqFail', 'reqNone', 'pendingConfirm',
 ];
 const zhStart = client.indexOf('      zh: {');
 const enStart = client.indexOf('      en: {');
@@ -136,27 +147,50 @@ check('探测关闭时 16 分钟前的证据算过期',
 check('探测关闭时 10 分钟前的证据仍算可用',
   healthOf({ state: 'closed', lastOkAt: now - 10 * 60_000 }, offSnap, now).tone === 'ok');
 
-// ---- 切换验证回执：切换成功 ≠ 模型能回话 ----
-// 用户的原话是"至今无法确定是否真的切换成功"，所以这里把"必须存在一条独立于
-// 游标移动的结论"钉成断言。
-check('快照下发 lastVerify 回执', /lastVerify:\s*runtime\.lastVerify/.test(index));
-check('manualFailback 返回 verify 字段', /return \{ ok: true, verify: this\.router\.runtime\.lastVerify \}/.test(index));
-mustNotMatch('manualFailback 不再用 void 丢掉验证结果', index, /void serviceBridge\?\.probeRoute\?\.\(route\)/);
-check('存在 verifyRoute 实现', /async function verifyRoute\(route, index\)/.test(index));
-check('verifyRoute 等锁而不是静默跳过', /探测锁被占用超过 25s/.test(index));
-check('验证失败回执会带错误码', /manual switch NOT verified/.test(index));
-check('真实请求失败会推翻"验证通过"', /source: 'request'/.test(index));
-check('手动意图随失败清除', /if \(runtime\.manualIndex === pos\) runtime\.manualIndex = null;/.test(index));
-check('client 有 verifyText 渲染器', /function verifyText\(v\)/.test(client));
-check('芯片面板渲染验证回执', /snap\?\.lastVerify/.test(client));
-check('验证中时加快轮询', /st\.lastVerify\?\.state === 'pending'/.test(client));
+// ---- 上一轮真实请求：面板唯一的事实行 ----
+// 用户的原话是"切换了到底有没有真的改模型我不知道"，所以这里钉死：
+// 面板必须显示真实请求走了哪条、成没成，而且没实证时不能编结论。
+check('面板渲染上一轮真实请求', /t\('reqOk'/.test(client) && /t\('reqFail'/.test(client));
+check('没发过消息时如实说没有', /t\('reqNone'\)/.test(client));
+check('刚切换时显示等待确认', /t\('pendingConfirm'/.test(client));
+check('面板不再有验证横幅', !/verifyText/.test(client));
+check('面板不再有颜色图例占位', !/t\('legendHealth'\)/.test(client));
+check('面板不再有宿主确认行', !/snap\?\.hostConfirmed/.test(client));
+check('没有 P1 视图时不写"正常"', !/healthBadge\(p1Entry, snap, now\) \|\| h\(Badge, \{ tone: 'muted' \}, t\('stateOk'\)\)/.test(client));
 check('设置页上报表单失败', /if \(!r\?\.ok\) setErr\(t\('saveFailed'/.test(client));
 check('设置页不再永久卡在加载中', /\.\.\.\(s \|\| \{\}\)/.test(client));
+check('探测被拒不画成黄色风险', /PROBE_UNSUPPORTED/.test(client));
+// 快照里保留字段名给老客户端，但恒为 null，不会被误读成"验证失败"
+check('lastVerify 恒为 null（老客户端兼容）', /lastVerify: null,/.test(index));
 
-// ---- 宿主确认回执：唯一不依赖插件自记账的"真的走这条路"证据 ----
-check('宿主回写被记成确认回执', /router\.runtime\.hostConfirmed = \{/.test(index));
-check('快照下发 hostConfirmed', /hostConfirmed: runtime\.hostConfirmed/.test(index));
-check('芯片面板显示宿主确认', /snap\?\.hostConfirmed/.test(client));
+// ---------- 6. 真跑 requestLineText：面板唯一事实行的状态矩阵 ----------
+const fmtAge2 = extractFunction(client, 'fmtAge');
+const rlSrc = extractFunction(client, 'requestLineText');
+const makeLine = new Function('t', 'fmtAge', `${rlSrc}\nreturn requestLineText;`);
+const lineOf = makeLine(stubT, new Function(`return ${fmtAge2}`)());
+const T0 = 1_000_000_000;
+const P = (snap) => lineOf(snap, T0);
+const cases2 = [
+  ['没发过消息 → 如实说没有', P(null), 'reqNone'],
+  ['请求已发出待结果', P({ lastRequest: { index: 1, state: 'sent', at: T0 - 1000 } }), 'reqSent'],
+  ['请求成功 → 事实', P({ lastRequest: { index: 1, state: 'ok', at: T0 - 5000, settledAt: T0 - 4000 } }), 'reqOk'],
+  ['请求失败 → 事实 + 错误码', P({ lastRequest: { index: 2, state: 'fail', at: T0 - 5000, code: 'QUOTA' } }), 'reqFail'],
+  ['刚切换且没有更新的请求 → 等待确认', P({ pendingConfirm: { index: 2, at: T0 }, lastRequest: { index: 0, state: 'ok', at: T0 - 60_000 } }), 'pendingConfirm'],
+  ['切换之后已有真实请求 → 以请求为准', P({ pendingConfirm: { index: 2, at: T0 - 10_000 }, lastRequest: { index: 2, state: 'ok', at: T0 - 5000, settledAt: T0 - 4000 } }), 'reqOk'],
+];
+for (const [name, got, want] of cases2) {
+  check(name, got && got.text.startsWith(want), `got ${got && got.text} want ${want}`);
+}
+check('失败用红色（其余用中性色）', P({ lastRequest: { index: 1, state: 'fail', at: T0, code: 'AUTH' } }).color.includes('error')
+  && P({ lastRequest: { index: 1, state: 'ok', at: T0, settledAt: T0 } }).color.includes('label-secondary'));
+check('P1 槽显示成 P1', P({ lastRequest: { index: -1, state: 'ok', at: T0, settledAt: T0 } }).text.includes('P1'));
+check('队列下标按 p1Follow 换算', P({ p1Follow: true, lastRequest: { index: 1, state: 'ok', at: T0, settledAt: T0 } }).text.includes('P3'));
+
+// ---------- 7. 探测被拒 ≠ 模型不可用 ----------
+check('探测被拒显示为未测（灰）',
+  healthOf({ state: 'closed', lastProbeAt: now - 5_000, probeOk: null, probeError: { code: 'PROBE_UNSUPPORTED' } }, snap, now).tone === 'muted');
+check('探测被拒的解释说明不影响可用性',
+  healthOf({ state: 'closed', lastProbeAt: now - 5_000, probeOk: null, probeError: { code: 'PROBE_UNSUPPORTED' } }, snap, now).detail === 'healthProbeUnsupportedHint');
 
 if (failures.length) {
   console.error(`✗ ${failures.length} 项失败 / ${pass + failures.length} 项`);

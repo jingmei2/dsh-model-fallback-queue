@@ -149,16 +149,16 @@ window.__ModuleLoader__.load({
         pickerNoneSelected: '请先勾选至少一个模型',
         probeSection: '周期健康探测',
         pingInterval: '间隔（毫秒，0=关闭；默认 60000=每 60 秒确认一次）',
-        pingSkipPaid: '周期探测跳过付费模型（省配额）',
-        pingCostWarn: '⚠ 周期探测会向模型发送真实请求，可能消耗配额/费用；付费模型默认跳过，可在下方关闭跳过',
+        pingSkipPaid: '周期探测跳过付费模型（省配额；默认关闭 = 全都探）',
+        pingCostWarn: '⚠ 周期探测会向模型发送真实请求（maxTokens=1），可能产生少量调用；默认探测所有模型，想省配额可打开下面的跳过',
         queueRowHint: '📌=最后兜底（大保底）· 颜色=健康状态，价格改用文字标注',
         // 健康证据（前瞻性）：颜色只表示"多久以前确认过它能回话"，不再表示价格、
         // 也不再表示"你在不在 P1"。免费/付费降级成灰色文字标签。
         healthOk: '可用',
         healthSlow: '偏慢',
         healthProbeFailed: '探测失败',
-        healthUnprobed: '未验证',
-        healthUnprobedHint: '还没有探测或真实请求的结果，不能假定它可用',
+        healthUnprobed: '未测',
+        healthUnprobedHint: '还没有探测或真实请求的结果',
         healthSkipPaidHint: '周期探测跳过了付费模型；点「探测全部」可立刻测一次',
         healthStale: '证据过期',
         healthAgo: '{age}前',
@@ -167,7 +167,16 @@ window.__ModuleLoader__.load({
         healthVerifying: '已过冷却，等一次探测确认',
         healthRecoverIn: '{age}后恢复',
         healthUnknown: '未知',
-        legendHealth: '●绿 可用 · ●黄 风险 · ●红 熔断 · ●灰 未验证',
+        healthProbeUnsupported: '探测被拒',
+        healthProbeUnsupportedHint: '该厂商拒绝了探测请求，不代表模型不可用（真实请求才是证据）',
+        // 面板唯一的事实行：上一轮真实请求走了哪条、结果如何。
+        // 这是「切换到底生效没有」的答案——不是探测，也不是游标。
+        reqSent: '上一轮：{label} · 已发出',
+        reqOk: '上一轮：{label} · 成功 · {ago}前',
+        reqFail: '上一轮：{label} · 失败 · {code}',
+        reqNone: '上一轮：还没发过消息',
+        pendingConfirm: '已切到 {label}，下一条消息会用它',
+        legendHealth: '●绿 可用 · ●黄 风险 · ●红 熔断 · ●灰 未测',
       },
       en: {
         addFallbackModel: 'Add fallback model',
@@ -286,14 +295,14 @@ window.__ModuleLoader__.load({
         pickerNoneSelected: 'Check at least one model first',
         probeSection: 'Periodic health probe',
         pingInterval: 'Interval (ms, 0 = off; default 60000 = check every 60s)',
-        pingSkipPaid: 'Skip paid models in periodic probes (saves quota)',
-        pingCostWarn: '⚠ Periodic probing sends real requests to models and may use quota/charges; paid models are skipped by default, disable the skip below to include them',
+        pingSkipPaid: 'Skip paid models in periodic probes (saves quota; off by default = probe everything)',
+        pingCostWarn: '⚠ Periodic probing sends real requests (maxTokens=1) and may consume a little quota; every model is probed by default — enable the skip below to save quota',
         queueRowHint: '📌 = last-resort · colour = health (price is text only)',
         healthOk: 'Healthy',
         healthSlow: 'Slow',
         healthProbeFailed: 'Probe failed',
-        healthUnprobed: 'Unverified',
-        healthUnprobedHint: 'No probe or real request result yet — cannot assume it works',
+        healthUnprobed: 'Untested',
+        healthUnprobedHint: 'No probe or real request result yet',
         healthSkipPaidHint: 'periodic probe skips paid models; press "probe all" to test it now',
         healthStale: 'Stale evidence',
         healthAgo: '{age} ago',
@@ -302,7 +311,14 @@ window.__ModuleLoader__.load({
         healthVerifying: 'cooled down, waiting for a probe',
         healthRecoverIn: 'recovers in {age}',
         healthUnknown: 'unknown',
-        legendHealth: '●green usable · ●amber risk · ●red tripped · ●grey unverified',
+        healthProbeUnsupported: 'Probe rejected',
+        healthProbeUnsupportedHint: 'This provider rejects probe requests; that does not mean the model is unusable (only real requests prove it)',
+        reqSent: 'Last request: {label} · sent',
+        reqOk: 'Last request: {label} · ok · {ago} ago',
+        reqFail: 'Last request: {label} · failed · {code}',
+        reqNone: 'Last request: none yet',
+        pendingConfirm: 'Switched to {label} — the next message will use it',
+        legendHealth: '●green usable · ●amber risk · ●red tripped · ●grey untested',
       },
     };
 
@@ -784,6 +800,16 @@ window.__ModuleLoader__.load({
         };
       }
       const age = Math.max(0, now - evidence);
+      // 探测被厂商拒绝（400 类）：这是"没测成"，不是"不可用"，所以是灰的。
+      // 把它画成黄风险会让一条完全正常的模型长期背着"探测失败"的锅。
+      if (e.probeError?.code === 'PROBE_UNSUPPORTED' && probedAt >= okAt) {
+        return {
+          tone: 'muted',
+          text: t('healthUnprobed'),
+          detail: t('healthProbeUnsupportedHint'),
+          short: t('healthAgo', { age: fmtAge(age) }),
+        };
+      }
       // 最近一次证据是"探测失败"（还没到熔断阈值）→ 黄：有风险，但还没被判死
       if (e.probeOk === false && probedAt >= okAt) {
         const code = e.probeError?.code ? ` · ${e.probeError.code}` : '';
@@ -842,24 +868,32 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 手动切换的验证回执 → 一行人类可读的结论。
-     * 这是「切换到底成不成」的唯一权威答案：切换本身只动游标，验证才证明能回话。
-     * @returns {{tone:string,text:string}|null}
+     * 面板顶部唯一的事实行：上一轮真实请求走了哪条、成没成。
+     *
+     * 「切换到底生效没有」只有这一个答案——游标是意图，探测是旁证，真实请求才是事实。
+     * 没发过消息就如实说没有；刚切换就说到等下一条；绝不编一个"验证通过"。
+     * @param {object|null} snap 运行态快照
+     * @param {number} now 当前时刻（算"多久以前"）
+     * @returns {{text:string, color:string}}
      */
-    function verifyText(v) {
-      if (!v) return null;
-      if (v.state === 'pending') return { tone: 'warn', text: t('verifyPending') };
-      if (v.code === 'BUSY') return { tone: 'warn', text: t('verifyBusy') };
-      if (v.state === 'ok') {
-        const ms = Number.isFinite(v.latencyMs) ? v.latencyMs : null;
-        return { tone: 'ok', text: ms === null ? t('healthOk') : t('verifyOk', { ms }) };
+    function requestLineText(snap, now) {
+      const lr = snap?.lastRequest;
+      const pc = snap?.pendingConfirm;
+      const pcNewer = Boolean(pc) && (!lr || pc.at >= lr.at);
+      const label = (i) => (i < 0 ? 'P1' : (snap?.p1Follow ? `P${i + 2}` : `P${i + 1}`));
+      const muted = 'var(--dsw-alias-label-secondary)';
+      if (pcNewer) return { text: t('pendingConfirm', { label: label(pc.index) }), color: muted };
+      if (lr && lr.state === 'ok') {
+        return { text: t('reqOk', { label: label(lr.index), ago: fmtAge(Math.max(0, now - (lr.settledAt || lr.at))) }), color: muted };
       }
-      const code = v.code || 'UNKNOWN';
-      if (v.source === 'request') return { tone: 'error', text: t('verifyRequestFailed', { code }) };
-      return {
-        tone: 'error',
-        text: v.message ? t('verifyFailMsg', { code, msg: v.message }) : t('verifyFail', { code }),
-      };
+      if (lr && lr.state === 'fail') {
+        return {
+          text: t('reqFail', { label: label(lr.index), code: lr.code || 'UNKNOWN' }),
+          color: 'var(--dsw-alias-state-error-primary, #c94141)',
+        };
+      }
+      if (lr && lr.state === 'sent') return { text: t('reqSent', { label: label(lr.index) }), color: muted };
+      return { text: t('reqNone'), color: muted };
     }
 
     /**
@@ -1163,23 +1197,7 @@ window.__ModuleLoader__.load({
             ? h('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } },
                 snap?.probingAll ? t('probingAll', { done: 0, total: cfg.queue.length }) : probeNote)
             : null,
-          // 切换验证回执：设置页的「切换」按钮同样要给出结论，否则切完仍是黑箱。
-          (() => {
-            const v = snap?.lastVerify;
-            const vt = verifyText(v);
-            if (!vt) return null;
-            const name = v.index < 0 ? 'P1'
-              : cfg.p1Follow ? `P${v.index + 2}` : `P${v.index + 1}`;
-            const color = {
-              ok: 'var(--dsw-alias-state-success-primary, #3a9e5f)',
-              warn: 'var(--dsw-alias-state-warn-primary, #c98a1b)',
-              error: 'var(--dsw-alias-state-error-primary, #c94141)',
-              muted: 'var(--dsw-alias-label-secondary, #888)',
-            }[vt.tone];
-            const mark = v.state === 'pending' ? '⏳ ' : v.state === 'ok' ? '✓ ' : '✕ ';
-            return h('div', { style: { fontSize: 11, fontWeight: 600, marginTop: 6, color } },
-              `${mark}${name} · ${vt.text}`);
-          })(),
+          // 切换的真实性在面板里看（上一轮真实请求走了哪条），设置页不重复占位。
         ),
         // 回切策略
         h(
@@ -1449,13 +1467,14 @@ window.__ModuleLoader__.load({
           }
           if (!alive) return;
           if (st) setSnap((prev) => (JSON.stringify(prev) === JSON.stringify(st) ? prev : st));
-          // 自适应轮询：稳定时 5s 一次；有请求在飞/刚发生过切换失败/验证回执还没落地、
-          // 或者弹层正开着时 1s 一次。固定 5s 会让"切到 P2 了但指示器还显示 P1"最多僵 5 秒，
-          // 也会让"验证中…"多挂 5 秒才给出结论。
+          // 自适应轮询：稳定时 5s 一次；有请求在飞/有路由非正常态/刚切换还没被
+          // 真实请求确认（等待位）时 1s 一次。固定 5s 会让"切到 P2 了但指示器还显示 P1"
+          // 最多僵 5 秒，也会让"已切到 P3，等下次请求确认"多挂 5 秒才更新。
           const live = st && (
             st.inFlightIndex >= 0
             || st.entries?.some((e) => e.state !== 'closed')
-            || st.lastVerify?.state === 'pending'
+            || Boolean(st.pendingConfirm)
+            || st.lastRequest?.state === 'sent'
           );
           timer = setTimeout(tick, live || open ? 1000 : 5000);
         };
@@ -1656,51 +1675,7 @@ window.__ModuleLoader__.load({
                     ? h(Badge, { tone: 'error' }, t('badgeAllTripped'))
                     : h(Badge, { tone: effHealth.tone }, t('badgeCurrent', { label: lbl(effective) })),
               ),
-              // 颜色图例：颜色曾被误读（琥珀=付费被当成"模型有问题"、离开 P1 也被画成黄），
-              // 这里把颜色的唯一含义写死，省得再猜。
-              h(
-                'div',
-                {
-                  style: {
-                    padding: '5px 14px',
-                    fontSize: 10,
-                    lineHeight: '15px',
-                    color: 'var(--dsw-alias-label-secondary)',
-                    borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
-                  },
-                },
-                t('legendHealth'),
-              ),
-              // 切换验证回执：这是「到底切成功没有」的唯一结论行。
-              // 切换只动游标，验证才证明这条模型能回话；失败时带上宿主给的错误码，
-              // 用户可以自己判断是额度、鉴权还是模型下架。
-              (() => {
-                const v = snap?.lastVerify;
-                const vt = verifyText(v);
-                if (!vt) return null;
-                const vColor = {
-                  ok: 'var(--dsw-alias-state-success-primary, #3a9e5f)',
-                  warn: 'var(--dsw-alias-state-warn-primary, #c98a1b)',
-                  error: 'var(--dsw-alias-state-error-primary, #c94141)',
-                  muted: 'var(--dsw-alias-label-secondary, #888)',
-                }[vt.tone];
-                const mark = v.state === 'pending' ? '⏳ ' : v.state === 'ok' ? '✓ ' : '✕ ';
-                return h(
-                  'div',
-                  {
-                    style: {
-                      padding: '6px 14px',
-                      fontSize: 11,
-                      fontWeight: 600,
-                      lineHeight: '16px',
-                      color: vColor,
-                      borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
-                    },
-                  },
-                  `${mark}${lbl(v.index)} · ${vt.text}`,
-                );
-              })(),
-              // 切换结果反馈条：只在切换本身失败（游标都没动）时出现
+              // 切换动作反馈：只在"游标都没动"（点了不可用的行）时出现
               flash
                 ? h(
                     'div',
@@ -1721,41 +1696,24 @@ window.__ModuleLoader__.load({
                     (flash.tone === 'ok' ? '✓ ' : '✕ ') + flash.text,
                   )
                 : null,
-              // 宿主确认回执：这是「真的发到了这条模型」的唯一实证，来自宿主自己的回写，
-              // 不依赖插件记账。没有实证时**什么都不画**——占一行写"还没有确认"是浪费面板。
+              // 唯一的事实行：上一轮真实请求走了哪条、成没成。
+              // 没有图例、没有验证横幅、没有解释句子：面板空间留给路由本身。
               (() => {
-                const hc = snap?.hostConfirmed;
-                if (!hc) return null;
-                const name = `${hc.provider} / ${hc.model}`;
+                const line = requestLineText(snap, now);
                 return h(
                   'div',
-                  { style: { padding: '5px 14px', fontSize: 10, lineHeight: '15px', color: 'var(--dsw-alias-label-secondary)', borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))' } },
-                  t('hostConfirmed', { name, ago: fmtAge(Math.max(0, now - hc.at)) }),
+                  {
+                    style: {
+                      padding: '6px 14px',
+                      fontSize: 11,
+                      lineHeight: '16px',
+                      color: line.color,
+                      borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
+                    },
+                  },
+                  line.text,
                 );
               })(),
-              // 实际在跑的路由：这块是"看报错就知道是谁的锅"的关键——
-              // 指示器显示的不是你手选的模型，而是这一轮真实请求发去了哪里。
-              h(
-                'div',
-                {
-                  style: {
-                    padding: '8px 14px',
-                    fontSize: 11,
-                    lineHeight: '18px',
-                    color: 'var(--dsw-alias-label-secondary)',
-                    borderBottom: '1px solid var(--dsw-elevation-stroke-color, var(--dsw-alias-label-secondary, #eee))',
-                  },
-                },
-                // 「已失效，已切走」只在真实熔断时显示：当前已不在 P1（p1Follow 下 -1 才是 P1）
-                // 且 P1 自己的熔断器非 closed。P1 健康时哪怕游标停在别处也不能喊"已失效"。
-                !activeIsP1 && p1Leaning
-                  ? h('div', { style: { opacity: 0.75 } }, t('badgeSwitchedAway', { label: lbl(active) }))
-                  : null,
-                // -1 在 p1Follow 下就是 P1（正常），不能说成"未经过队列"
-                !p1Follow && inFlight < 0 && enabled
-                  ? h('div', { style: { opacity: 0.75 } }, t('noteNotQueued'))
-                  : null,
-              ),
               // 队列条目
               h(
                 'div',
@@ -1787,7 +1745,9 @@ window.__ModuleLoader__.load({
                   p1Active
                     ? h('span', { style: { fontSize: 10, color: 'var(--dsw-alias-brand-primary, #4f7cf7)', fontWeight: 600 } }, t('currentTag'))
                     : null,
-                  healthBadge(p1Entry, snap, now) || h(Badge, { tone: 'muted' }, t('stateOk')),
+                  // 没有 P1 视图（还没发过消息、拿不到会话模型）时不能写"正常"：
+                  // 那是在替一条从未验证过的路由打包票。
+                  healthBadge(p1Entry, snap, now) || h(Badge, { tone: 'muted' }, t('healthUnprobed')),
                   circuitInfoIcon(p1Entry, snap),
                   ),
                 ...(entries.length === 0

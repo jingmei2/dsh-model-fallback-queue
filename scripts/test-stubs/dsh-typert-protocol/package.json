@@ -1,0 +1,9 @@
+{
+  "name": "@deepseek-ai/dsh-typert-protocol",
+  "version": "0.0.0-test",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  }
+}

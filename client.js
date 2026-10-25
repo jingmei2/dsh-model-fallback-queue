@@ -138,12 +138,21 @@ window.__ModuleLoader__.load({
         paidFree: '免费',
         paidPaid: '付费',
         paidUnknown: '未标注',
-        setPaidFree: '标为免费',
-        setPaidPaid: '标为付费',
-        setPaidUnknown: '清除标记',
+        // 轮转顺序 unknown → free → paid → unknown；title 一律写「点击后」的结果，
+        // 不写当前态（旧实现的 title 与点击效果恰好相反，是个误导）。
+        paidNextFree: '点击后：标为免费',
+        paidNextPaid: '点击后：标为付费',
+        paidNextUnknown: '点击后：清除标记',
+        paidCycle: '点击切换免费/付费标注（轮转：未标注→免费→付费→未标注）',
         probeAll: '探测全部',
         probingAll: '探测中… {done}/{total}',
         probeAllDone: '探测完成：{ok} 可用 / {fail} 不可用',
+        probeAllDoneSkipped: '探测完成：{ok} 可用 / {fail} 不可用 / {skipped} 跳过',
+        probeAllFailed: '探测没有进行：{reason}',
+        probeBusy: '上一轮探测还没结束，稍等再点',
+        probeNoLlm: '宿主没有提供 llm 服务，插件无法发探测请求',
+        probeUnavailable: '插件服务还没挂载完成，稍后重试',
+        probeError: '探测过程出错',
         pickerAddN: '添加 {n} 个到队列',
         pickerTierHeader: '厂商：{name}',
         pickerNoneSelected: '请先勾选至少一个模型',
@@ -284,12 +293,20 @@ window.__ModuleLoader__.load({
         paidFree: 'Free',
         paidPaid: 'Paid',
         paidUnknown: 'Unmarked',
-        setPaidFree: 'Mark as free',
-        setPaidPaid: 'Mark as paid',
-        setPaidUnknown: 'Clear mark',
+        // Titles describe the CLICK RESULT, not the current state (the old mapping was inverted).
+        paidNextFree: 'Click: mark as free',
+        paidNextPaid: 'Click: mark as paid',
+        paidNextUnknown: 'Click: clear mark',
+        paidCycle: 'Click to cycle free/paid (unmarked→free→paid→unmarked)',
         probeAll: 'Probe all',
         probingAll: 'Probing… {done}/{total}',
         probeAllDone: 'Probe done: {ok} ok / {fail} unavailable',
+        probeAllDoneSkipped: 'Probe done: {ok} ok / {fail} unavailable / {skipped} skipped',
+        probeAllFailed: 'Probe did not run: {reason}',
+        probeBusy: 'previous probe still running, retry in a moment',
+        probeNoLlm: 'the host exposes no llm service, so probes cannot be sent',
+        probeUnavailable: 'plugin service not mounted yet, retry shortly',
+        probeError: 'the probe run itself threw',
         pickerAddN: 'Add {n} to queue',
         pickerTierHeader: 'Vendor: {name}',
         pickerNoneSelected: 'Check at least one model first',
@@ -342,6 +359,18 @@ window.__ModuleLoader__.load({
     const STICKY = 'sticky';
     const PROBE = 'probe';
     const MANUAL = 'manual';
+
+    /**
+     * host 端 probeAllRoutes 的失败原因 → 文案键。
+     * 探测失败必须能说清「为什么没探成」，否则界面只剩一句"失败"，用户没法判断
+     * 是自己没配 llm、还是上一轮还在跑、还是探测被厂商拒了。
+     */
+    const PROBE_REASON_KEYS = {
+      busy: 'probeBusy',
+      'no-stream': 'probeNoLlm',
+      unavailable: 'probeUnavailable',
+      error: 'probeError',
+    };
 
     // ---------- 共享小部件 ----------
 
@@ -1029,14 +1058,22 @@ window.__ModuleLoader__.load({
       const probeAll = async () => {
         setProbing(true);
         setProbeNote(null);
+        setErr(null);
         const r = await host.pingAll();
         await refresh();
         setProbing(false);
         if (r?.ok && Array.isArray(r.results)) {
           const ok = r.results.filter((x) => x.ok === true).length;
           const fail = r.results.filter((x) => x.ok === false).length;
-          setProbeNote(t('probeAllDone', { ok, fail }));
+          const skipped = r.results.filter((x) => x.skipped === true).length;
+          setProbeNote(t(skipped ? 'probeAllDoneSkipped' : 'probeAllDone', { ok, fail, skipped }));
+          return;
         }
+        // 探测没跑成必须说出来。旧实现只在 r.ok 时写提示，失败/返回 null 时
+        // 界面完全没动静 —— 用户会以为"探测完成、一切正常"，
+        // 而实际上（必修 1 的参数不匹配）每次点击都被网关拒绝了。
+        const reason = r?.reason || 'unknown';
+        setErr(t('probeAllFailed', { reason: PROBE_REASON_KEYS[reason] ? t(PROBE_REASON_KEYS[reason]) : reason }));
       };
 
       const modes = [
@@ -1143,8 +1180,13 @@ window.__ModuleLoader__.load({
                       'button',
                       {
                         onClick: () => cyclePaid(i),
-                        title: qValPaid(r) === 'free' ? t('setPaidFree') : qValPaid(r) === 'paid' ? t('setPaidPaid') : t('setPaidUnknown'),
-                        'aria-label': t('queueRowHint'),
+                        // title 必须写"点击后会发生什么"，不是"当前是什么"。
+                        // 旧实现拿当前态去取键：free 行显示「标为免费」（点下去却变成付费）、
+                        // unknown 行显示「清除标记」（点下去其实是标成免费）——恰好全反。
+                        title: qValPaid(r) === 'unknown'
+                          ? t('paidNextFree')
+                          : qValPaid(r) === 'free' ? t('paidNextPaid') : t('paidNextUnknown'),
+                        'aria-label': t('paidCycle'),
                         style: btnSmall,
                       },
                       r.paid === 'free' ? t('paidFree') : r.paid === 'paid' ? t('paidPaid') : t('paidUnknown'),
@@ -1191,11 +1233,17 @@ window.__ModuleLoader__.load({
               title: t('probeAll'),
               style: probing || !cfg.enabled || !cfg.queue.length ? btnSmallDisabled : btnSmall,
             },
-              probing ? t('probingAll', { done: 0, total: cfg.queue.length }) : t('probeAll')),
+              // 进度用快照里的真实 done/total（维护者建议 1：旧实现 done 恒为 0，
+              // 文案写着 n/N 却永远显示 0/N，等于撒谎）。快照还没到就退回 0/total。
+              probing
+                ? t('probingAll', { done: snap?.probingDone ?? 0, total: snap?.probingTotal || cfg.queue.length })
+                : t('probeAll')),
           ),
           (probeNote || snap?.probingAll)
             ? h('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)' } },
-                snap?.probingAll ? t('probingAll', { done: 0, total: cfg.queue.length }) : probeNote)
+                snap?.probingAll
+                  ? t('probingAll', { done: snap?.probingDone ?? 0, total: snap?.probingTotal || cfg.queue.length })
+                  : probeNote)
             : null,
           // 切换的真实性在面板里看（上一轮真实请求走了哪条），设置页不重复占位。
         ),
@@ -1456,6 +1504,14 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         let alive = true;
         let timer = null;
+        // 快轮询的"冷却预算"：活跃条件下每轮递减，快照有变化就重置。
+        // 为什么需要这个上限：熔断/等待位这些"活跃"条件并不总会自己消解——
+        // 粘滞模式下一次故障切换后 inFlightIndex 会**长期**停在 >=0（那是稳定态，
+        // 不是进行中），半开的路由若没人去探也会一直挂着 half_open。旧实现把这些
+        // 当成"永远 live"，于是芯片在稳态下永久 1 秒一次 RPC，而且用的是**全局**
+        // inFlightIndex——任何一个会话切过一次，所有会话的芯片都跟着高频轮询。
+        // 现在：活跃期最多快轮 20 次（约 20s），没新变化就回落到 5s。
+        let fastBudget = 20;
         const tick = async () => {
           // 顺手重读一次 DOM 模型名（老宿主回退路径也靠它）
           if (pullLabelRef.current) pullLabelRef.current();
@@ -1466,17 +1522,32 @@ window.__ModuleLoader__.load({
             console.warn('[fallback-queue] snapshot failed', e);
           }
           if (!alive) return;
-          if (st) setSnap((prev) => (JSON.stringify(prev) === JSON.stringify(st) ? prev : st));
-          // 自适应轮询：稳定时 5s 一次；有请求在飞/有路由非正常态/刚切换还没被
-          // 真实请求确认（等待位）时 1s 一次。固定 5s 会让"切到 P2 了但指示器还显示 P1"
-          // 最多僵 5 秒，也会让"已切到 P3，等下次请求确认"多挂 5 秒才更新。
-          const live = st && (
-            st.inFlightIndex >= 0
-            || st.entries?.some((e) => e.state !== 'closed')
+          let changed = false;
+          if (st) {
+            setSnap((prev) => {
+              changed = JSON.stringify(prev) !== JSON.stringify(st);
+              return changed ? st : prev;
+            });
+          }
+          if (changed) fastBudget = 20;
+          // 本会话的实际路由（没有则退回 -1 = 未覆盖）。
+          // 用全局 inFlightIndex 会把"别的会话切过"也算成本会话活跃。
+          const myIdx = st && st.sessionInFlight && props.sessionId !== undefined
+            && Number.isInteger(st.sessionInFlight[props.sessionId])
+            ? st.sessionInFlight[props.sessionId]
+            : -1;
+          // 真正"还在动"的信号：请求已发出等结果、刚切换等确认、有路由非正常态。
+          // 注意排除"稳在后备上"（myIdx>=0 但请求早已落账）——那是粘滞模式的常态。
+          const active = Boolean(st) && (
+            st.lastRequest?.state === 'sent'
             || Boolean(st.pendingConfirm)
-            || st.lastRequest?.state === 'sent'
+            || st.entries?.some((e) => e.state === 'half_open' || e.state === 'open')
           );
-          timer = setTimeout(tick, live || open ? 1000 : 5000);
+          const fast = (active && fastBudget > 0) || open;
+          if (fast && !changed) fastBudget -= 1;
+          // 自适应轮询：活跃期 1s；稳态 5s。固定 5s 会让"切到 P2 了但指示器还显示 P1"
+          // 最多僵 5 秒；固定 1s 则是稳态下无意义的 RPC 洪水。
+          timer = setTimeout(tick, fast ? 1000 : 5000);
         };
         // open 进依赖 = 点开/收起弹层时立刻重跑一次 tick：
         // 用户手选模型后宿主早已更新状态，点开却要等下一次轮询才看到新名字（用户报"卡 3 秒以上"）。
@@ -1832,9 +1903,29 @@ window.__ModuleLoader__.load({
                     ? h(
                         'button',
                         {
-                          onClick: () => { void host.pingAll().then(() => { /* 周期性快照会刷新徽章 */ }); },
+                          // 旧实现 void host.pingAll().then(空)：探测失败（例如必修 1 的
+                          // 参数不匹配被网关拒绝）整条链被 void 吞掉，面板毫无反应，
+                          // 用户以为"探过了、没事"。现在把失败摆到面板的 flash 条上。
+                          onClick: () => {
+                            void host.pingAll().then((r) => {
+                              // 成功不需要额外提示：徽章和进度会自己刷新；
+                              // 失败必须有话说，否则等于没点。
+                              if (r?.ok) return;
+                              const reason = r?.reason || 'unknown';
+                              setFlash({
+                                tone: 'error',
+                                text: t('probeAllFailed', {
+                                  reason: PROBE_REASON_KEYS[reason] ? t(PROBE_REASON_KEYS[reason]) : reason,
+                                }),
+                              });
+                              if (flashTimer.current) clearTimeout(flashTimer.current);
+                              flashTimer.current = setTimeout(() => setFlash(null), 6000);
+                            });
+                          },
                           disabled: snap?.probingAll === true,
-                          title: snap?.probingAll === true ? t('probingAll', { done: 0, total: entries.length }) : t('probeAll'),
+                          title: snap?.probingAll === true
+                            ? t('probingAll', { done: snap?.probingDone ?? 0, total: snap?.probingTotal || entries.length })
+                            : t('probeAll'),
                           style: {
                             fontSize: 11,
                             padding: '3px 10px',
@@ -1846,7 +1937,9 @@ window.__ModuleLoader__.load({
                             opacity: snap?.probingAll === true ? 0.5 : 1,
                           },
                         },
-                        snap?.probingAll === true ? t('probingAll', { done: 0, total: entries.length }) : t('probeAll'),
+                        snap?.probingAll === true
+                          ? t('probingAll', { done: snap?.probingDone ?? 0, total: snap?.probingTotal || entries.length })
+                          : t('probeAll'),
                       )
                     : null,
                   onOpenSettings
@@ -1935,7 +2028,12 @@ window.__ModuleLoader__.load({
           namespace: 'dsh-model-fallback-queue',
           method: 'pingAll',
           invocation: { kind: 'direct' },
-          parameters: [{ name: 'opts', wire: 'opts', source: 'json', codec: jsonCodec('dsh-model-fallback-queue#PingAllOpts') }],
+          // ⚠️ 必须是空参数表。曾声明成 [{name:'opts',...}] 而三个调用点全都不传参，
+          // 网关按声明校验实参个数，于是每次点「探测全部」都被拒：
+          //   client api: ...expected 1 argument(s), got 0
+          // 失败只进 console.warn，界面毫无动静 —— 用户以为"探测完成、一切正常"。
+          // 实现 async pingAll() 本来就不收参，声明与实现对齐即可。
+          parameters: [],
           result: { mode: 'src-json' },
         },
       ],

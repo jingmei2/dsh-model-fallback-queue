@@ -2,6 +2,63 @@
 
 本项目更新日志按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] — 厂商勾选 / 大保底 / 免费付费 / 快速探测（含维护者评审修复）
+
+维护者 [@HelloQingTao](https://github.com/HelloQingTao) 在 PR #2 上做了一轮真机评审
+（web profile + playwright），指出 2 个必修 + 4 个建议。本版本全部收口。
+
+### 修复（必修）
+
+**① 「探测全部」从来没真正跑过 —— RPC 参数声明与调用不一致**
+
+`client.js` 把 `pingAll` 声明成要 1 个 `opts` 参数，但三个调用点（设置页、芯片面板、
+`rpcFace`）全都不传参；而 host 端 `async pingAll()` 本来就不收参。网关按声明校验实参个数，
+于是**每一次点击都被拒绝**：
+
+```
+client api: dsh-model-fallback-queue/pingAll expected 1 argument(s), got 0
+```
+
+更糟的是失败只进 `console.warn`，界面毫无动静 —— 用户会以为「探测完成、一切正常」，
+而实际上一条都没探。修法：声明改成 `parameters: []` 与实现对齐，**并且把失败摆到界面上**
+（设置页顶部错误条 / 芯片面板 flash 条），附带可读原因（探测忙 / 宿主无 llm / 服务未挂载）。
+
+**② 配置里预置的周期探测间隔永远不生效**
+
+`schedulePing()` 在 `apply` 前半区执行，早于 `loadSettings()`（后者在异步 IIFE 里）。
+那一刻 `config.pingIntervalMs` 还是 Config 默认值；而 `settings/document-updated` 只在
+UI 保存时触发。于是「配置文件写着 `pingIntervalMs: 60000`、从没在界面上保存过、然后重启」
+这条路径永远排不上周期探测（维护者实测 70 秒无任何探测）。`migratePingDefaults()` 只在
+首次迁移时调 `schedulePing`，已迁移用户直接 return，兜不住。现在 `loadSettings` +
+`loadQueue` + 迁移全部完成后**无条件再排一次**。
+
+### 改进（维护者建议）
+
+- **探测进度是真的 n/N**：旧实现只有 `probingAll` 布尔，前端文案「探测中… 0/N」里的
+  n 硬编码为 0（宣称的进度从未实现）。现在 host 端按「本轮真正要探的条数」记账
+  `{done,total}`，每探完一条推进一次快照，跳过付费时 total 不含被跳过项；结束即清空。
+- **免费/付费按钮的 title 改成「点击后会发生什么」**：旧实现拿当前态取键，导致
+  free 行显示「标为免费」（点下去却变付费）、unknown 行显示「清除标记」（点下去其实是标免费）——
+  恰好全反。现在统一为「点击后：标为免费 / 标为付费 / 清除标记」。
+- **补单元测试**：PR 描述曾宣称「pinned 已实测」，但仓库里既无 test script 也无测试文件。
+  新增 `scripts/test-queue-order.mjs`，把 `nextPositions` / `reorderPinnedLast` 的真实源码
+  截出来直接执行，覆盖大保底恒最后、多个 pinned 顺延、全 pinned 退化、空队列、单条队列，
+  以及两条跨模式不变量（pinned 全在非 pinned 之后、候选恰好覆盖整圈且无重复）。
+- **补执行验证**：新增 `scripts/verify-execution.mjs`，用真实 `index.js` + 假宿主真的跑
+  `apply()` 和 `pingAll()`。这一层专门用来抓「源码看起来完全正常、运行时却静默失效」的 bug
+  （上面两条必修都不会让源码断言失败）。已做双向反向对照：把任一修复还原，对应断言必失败。
+- **版本与脚本**：`package.json` 从 `0.2.5`（PR 基线）升到 `0.3.0`，与 CHANGELOG 计划版本一致；
+  新增 `npm test`（源码断言 + 纯函数单测 + 执行验证）与 `npm run prepare:test`。
+
+### 验证
+
+```bash
+npm test        # 137 源码断言 + 126 队列顺序断言 + 21 执行验证，全绿
+node --check index.js && node --check client.js && node --check state.js
+```
+
+---
+
 ## [0.2.12] — 面板只说话不解释：切换真的生效没有，看真实请求
 
 ### 修复
@@ -86,7 +143,7 @@
 - 设置页的「切换」按钮同样接入验证回执，切完有结论。
 - 验证回执处于 pending 时前端加快轮询（1s），结论不再拖到下一个 5s 周期。
 
-## [未发布] — 计划 v0.3.0
+## [0.3.0 功能详录] — 四大功能的完整说明
 
 ### 新增
 

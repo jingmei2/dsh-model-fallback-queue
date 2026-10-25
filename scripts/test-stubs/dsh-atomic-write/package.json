@@ -1,0 +1,9 @@
+{
+  "name": "@deepseek-ai/dsh-atomic-write",
+  "version": "0.0.0-test",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  }
+}

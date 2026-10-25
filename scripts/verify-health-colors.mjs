@@ -65,7 +65,9 @@ mustMatch('标题徽章颜色也来自 health', client, /h\(Badge, \{ tone: effH
 
 // ---------- 3. 服务端下发前瞻证据 ----------
 mustMatch('探测成功记账', index, /stampProbe\(true\)/);
-mustMatch('探测失败记账', index, /stampProbe\(false\)/);
+// 失败路径不再调 stampProbe(false)，而是 stampFailure(code,msg[,probeOk])：
+// 探测被拒（PROBE_UNSUPPORTED）要写成 probeOk=null，不能一概 false。
+mustMatch('探测失败记账（stampFailure）', index, /stampFailure\(/);
 mustMatch('探测记录耗时', index, /c\.probeLatencyMs = Date\.now\(\) - startedAt/);
 mustMatch('真实成功也刷新 lastOkAt', index, /c\.lastOkAt = Date\.now\(\)/);
 for (const f of ['lastOkAt', 'lastProbeAt', 'probeLatencyMs', 'probeOk']) {
@@ -75,6 +77,51 @@ mustMatch('snapshot 暴露 pingIntervalMs', index, /pingIntervalMs: Number\(conf
 mustMatch('snapshot 暴露 pingSkipPaid', index, /pingSkipPaid: config\.pingSkipPaid !== false/);
 mustMatch('默认周期探测为 60s', index, /pingIntervalMs: 60_000/);
 mustMatch('一次性迁移已接线', index, /await migratePingDefaults\(\)/);
+
+// ---------- 维护者评审：两条必修 + 一条建议的回归锁 ----------
+// 必修 1：pingAll 的 RPC 声明必须与实现同为「零参数」。
+// 曾声明 [{name:'opts'}] 而三个调用点全不传参 → 网关拒绝每次点击：
+// client api: ...expected 1 argument(s), got 0，而失败只 console.warn，
+// 界面毫无动静，用户以为"探测完成、一切正常"。
+{
+  const declStart = client.indexOf("method: 'pingAll'");
+  check('pingAll 声明存在于 client', declStart > 0);
+  const declEnd = client.indexOf('result:', declStart);
+  // 先剥掉行注释：说明性注释里也会出现 parameters / opts 字样，
+  // 不剥的话断言会被自己的注释命中（假阴性）。
+  const decl = client
+    .slice(declStart, declEnd)
+    .replace(/\/\/[^\n]*/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+  mustMatch('pingAll RPC 声明为无参（与实现一致）', decl, /parameters:\s*\[\s*\]/);
+  mustNotMatch('pingAll 不再要求 opts 参数', decl, /name:\s*'opts'/);
+}
+mustMatch('pingAll 实现不收参', index, /async pingAll\(\)\s*\{/);
+mustMatch('设置页探测失败会提示', client, /setErr\(t\('probeAllFailed'/);
+mustMatch('芯片面板探测失败会提示', client, /t\('probeAllFailed'/);
+mustMatch('探测失败文案存在', client, /probeAllFailed:/);
+mustMatch('探测失败原因映射存在', client, /PROBE_REASON_KEYS/);
+
+// 必修 2：周期探测必须在 settings 加载完之后再排一次。
+// apply 体里的 schedulePing() 跑在 loadSettings() 之前，那时 config 还是默认值，
+// 而 settings/document-updated 只在 UI 保存时触发 —— 配置预置的间隔永远排不上。
+{
+  const bootStart = index.indexOf('// ---- 启动加载设置 ----');
+  check('启动加载设置区块存在', bootStart > 0);
+  const bootBlock = index.slice(bootStart, bootStart + 1200);
+  mustMatch('loadSettings 之后补排周期探测',
+    bootBlock, /await migratePingDefaults\(\)[\s\S]*?schedulePing\(\)/);
+}
+
+// 建议 1：探测进度必须是真实 n/N，不能硬编码 done:0
+mustMatch('探测进度 done 由 host 记账', index, /runtime\.probeProgress = \{ done, total: planned \}/);
+mustMatch('snapshot 暴露真实探测进度', index, /probingDone: runtime\.probeProgress/);
+mustNotMatch('进度文案不再硬编码 done: 0', client, /done: 0, total/);
+
+// 建议 2：paid 按钮 title 必须写「点击后」，不能拿当前态取键
+mustNotMatch('paid title 不再用当前态取键', client, /qValPaid\(r\) === 'free' \? t\('setPaidFree'\)/);
+mustMatch('paid title 使用点击后语义', client, /t\('paidNextFree'\)/);
+
 // ---- 切换的真实性：只能由「真实请求」证明，不能由探测伪造 ----
 mustNotMatch('切换时不再发探测（旧实现会写出 NO_SESSION_MODEL 假失败）', index, /verifyRoute/);
 mustMatch('切换只记等待位', index, /r\.pendingConfirm = \{ index: i, at: Date\.now\(\) \}/);
@@ -88,6 +135,42 @@ mustMatch('探测体只用最小字段', index, /messages: \[\{ role: 'user', co
 mustMatch('探测被拒不冒充风险', index, /PROBE_UNSUPPORTED/);
 mustMatch('默认探测不跳过付费', index, /pingSkipPaid: false/);
 mustMatch('跳过付费的旧默认只迁移一次', index, /pingSkipPaidMigrated/);
+
+// ---------- 3b. 三个"静默失效"的硬约束（字符串断言曾全部漏掉） ----------
+// 这些 bug 的共同点：不抛错、不报警，只是功能悄悄不工作。
+// 用正则把它们钉死，避免以后又被"看起来对"的代码蒙混。
+mustMatch('apply 第二参是 Config（不是 llm 服务）', index, /export function apply\(ctx, pluginConfig/);
+mustNotMatch('apply 不得把服务写成第二参', index, /export function apply\(ctx, llm\)/);
+mustMatch('llm 必须经 ctx 取服务', index, /const llm = ctx\.get \? ctx\.get\('llm'\) : ctx\.llm/);
+mustMatch('router 暴露 circuitOf 给探测半区', index, /^\s{4}circuitOf,\s*$/m);
+// probeOne 里不得再出现裸 circuitOf（那是 ReferenceError 的原始形态）
+{
+  const probeStart = index.indexOf('async function probeOne(');
+  const probeEnd = index.indexOf('async function probeRoute(', probeStart);
+  const probeBody = index.slice(probeStart, probeEnd);
+  check('probeOne 不裸调 circuitOf（跨作用域）', !/(?<!router\.)\bcircuitOf\(/.test(probeBody));
+  // 两处记账入口（stampProbe / stampFailure）都必须经 router
+  check('probeOne 记账经 router.circuitOf', (probeBody.match(/router\.circuitOf\(/g) || []).length >= 2);
+}
+// 探测成功判定必须逐 chunk 判 finish.reason.kind，不能"拿到第一帧就通过"
+{
+  const probeStart = index.indexOf('async function probeOne(');
+  const probeEnd = index.indexOf('async function probeRoute(', probeStart);
+  const probeBody = index.slice(probeStart, probeEnd);
+  check('探测判定读 finish.reason.kind', /chunk\.reason\?\.kind/.test(probeBody));
+  check('探测把 error/aborted 判为失败', /'error'\s*\|\|\s*kind === 'aborted'|kind === 'error'/.test(probeBody));
+  check('探测不再"首个 chunk 即成功"', !/首个 chunk 即视为可用/.test(probeBody));
+  check('探测超时改用 AbortSignal', /AbortController/.test(probeBody) && /controller\.abort\(\)/.test(probeBody));
+  check('探测定时器必须清理', /finally\s*\{[\s\S]*clearTimeout\(timer\)/.test(probeBody));
+  check('探测把 signal 传给宿主', /signal: controller\.signal/.test(probeBody));
+}
+// 回切策略三态必须真的被区分：probe 要读防抖，manual 不得自动回切
+mustMatch('probe 模式读取 failbackDelayMs 防抖', index, /config\.failbackDelayMs/);
+mustMatch('manual 模式禁止自动回切', index, /mode === 'manual'\)\s*return false/);
+mustMatch('probe 回切打 PROBE_FAILBACK 标记', index, /PROBE_FAILBACK/);
+// 客户端轮询必须有快轮预算，不能永久 1s
+mustMatch('芯片轮询有 fastBudget 上限', client, /fastBudget/);
+mustNotMatch('芯片轮询不再用全局 inFlightIndex 判活跃', client, /st\.inFlightIndex >= 0\s*\|\|/);
 
 // ---------- 4. 双语键齐全 ----------
 const keys = [

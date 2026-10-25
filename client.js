@@ -1910,11 +1910,25 @@ window.__ModuleLoader__.load({
                           // 旧实现 void host.pingAll().then(空)：探测失败（例如必修 1 的
                           // 参数不匹配被网关拒绝）整条链被 void 吞掉，面板毫无反应，
                           // 用户以为"探过了、没事"。现在把失败摆到面板的 flash 条上。
+                          // 再一版：成功也必须有回执。旧注释说"徽章会自己刷新"，
+                          // 但徽章色不变时用户无法区分"没反应"和"反应了但没变化"
+                          // （用户实测：「有反应，但好像也没去测试，完全确定不了」）。
                           onClick: () => {
                             void host.pingAll().then((r) => {
-                              // 成功不需要额外提示：徽章和进度会自己刷新；
-                              // 失败必须有话说，否则等于没点。
-                              if (r?.ok) return;
+                              if (r?.ok && Array.isArray(r.results)) {
+                                const okN = r.results.filter((x) => x.ok === true).length;
+                                const failN = r.results.filter((x) => x.ok === false).length;
+                                const skipN = r.results.filter((x) => x.skipped === true).length;
+                                setFlash({
+                                  tone: 'ok',
+                                  text: t(skipN ? 'probeAllDoneSkipped' : 'probeAllDone', {
+                                    ok: okN, fail: failN, skipped: skipN,
+                                  }),
+                                });
+                                if (flashTimer.current) clearTimeout(flashTimer.current);
+                                flashTimer.current = setTimeout(() => setFlash(null), 5000);
+                                return;
+                              }
                               const reason = r?.reason || 'unknown';
                               setFlash({
                                 tone: 'error',

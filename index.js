@@ -1258,6 +1258,12 @@ export function apply(ctx, pluginConfig = {}) {
       c.probeOk = probeOk;
       c.lastProbeCode = code;
       c.lastProbeMessage = message || '';
+      // ⚠️ 失败也必须记时间戳。旧实现只记错误码不记 lastProbeAt，而前端判
+      // 「有没有证据」看的正是这个字段——于是「探测失败」和「从没探测过」在
+      // 界面上长得一模一样（都是灰「未测」）。用户点完「探测全部」看到一片
+      // 未测，完全无法区分"测过且挂了"和"压根没测"。
+      c.lastProbeAt = Date.now();
+      c.probeLatencyMs = Date.now() - startedAt;
     };
     ctx.logger?.info?.('[fallback-queue] probing route %s/%s', route.provider, route.model);
     // 超时用 AbortSignal 传给宿主：旧实现用 Promise.race + setTimeout，超时后
@@ -1384,14 +1390,27 @@ export function apply(ctx, pluginConfig = {}) {
     probingAll = true;
     router.runtime.probeInFlight = true;
     const queue = config.queue || [];
+    // ⚠️ P1 槽必须一起探。旧实现只遍历 config.queue —— p1Follow 下 P1 = 会话
+    // 模型、根本不在队列里，于是它**永远轮不到探测**，面板上永远是灰「未测」，
+    // 哪怕它正是此刻给用户回话的那条（用户实测：P1 灰色"完全不对"，属实）。
     // 进度按「本轮真正要探的条数」算：跳过付费时 total 不含被跳过项，
     // 否则 UI 会永远停在 n/(含跳过) 而看起来没走完。
-    const planned = skipPaid ? queue.filter((r) => r.paid !== 'paid').length : queue.length;
+    const p1Slot = config.p1Follow ? router.sessionModelFor(null) : null;
+    const planned = (p1Slot ? 1 : 0)
+      + (skipPaid ? queue.filter((r) => r.paid !== 'paid').length : queue.length);
     router.runtime.probeProgress = { done: 0, total: planned };
     router.touch();
     const results = [];
     let done = 0;
     try {
+      if (p1Slot) {
+        // P1 是用户手选的会话模型，没有 paid 标记可言：手动/周期都探它。
+        const ok = await probeOne(p1Slot);
+        results.push({ index: -1, provider: p1Slot.provider, model: p1Slot.model, ok, skipped: false });
+        done += 1;
+        router.runtime.probeProgress = { done, total: planned };
+        router.touch();
+      }
       for (const [i, r] of queue.entries()) {
         if (skipPaid && r.paid === 'paid') {
           results.push({ index: i, provider: r.provider, model: r.model, ok: null, skipped: true });

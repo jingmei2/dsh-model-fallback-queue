@@ -293,6 +293,50 @@ ok('index.js 可被真实 import', typeof mod.apply === 'function');
   ok('router 暴露 circuitOf（探测记账所需）', typeof plug?.router?.circuitOf === 'function');
 }
 
+// ================= 场景 H：全员探测必须包含 P1 槽；失败也要记时间戳 =================
+// 用户实测的两个"完全确定不了"：
+//  ① P1 永远灰「未测」——旧 probeAllRoutes 只遍历 config.queue，p1Follow 下
+//     P1 = 会话模型根本不在队列里，永远轮不到探测（哪怕它正在给用户回话）。
+//  ② 探测失败显示成「从没测过」——旧 stampFailure 不写 lastProbeAt，而前端
+//     判「有没有证据」看的正是它；失败与未测在界面上无法区分。
+{
+  const hllm = makeLlm();
+  const { ctx, hooks } = makeCtx({ enabled: true, pingIntervalMs: 0, p1Follow: true }, hllm);
+  mod.apply(ctx, { enabled: true });
+  await new Promise((r) => setTimeout(r, 150));
+  const svc = ctx.__service;
+  if (svc && hooks['agent/request']) {
+    await svc.setQueue([{ provider: 'p', model: 'auth', pinned: false, paid: 'free' }]);
+    // 先走一次 P1 真实放行，让插件采样到会话模型（P1 槽的"本尊"）
+    const out = await hooks['agent/request'](
+      { agent: { session: { id: 'sess-p1probe' } } },
+      async () => ({ provider: 'host', model: 'good', maxTokens: 10 }),
+    );
+    ok('P1 放行返回原配置', out?.provider === 'host' && out?.model === 'good');
+
+    hllm.calls.length = 0;
+    const pingRes = await svc.pingAll();
+    const snapH = await svc.snapshot();
+    const p1Res = (pingRes?.results || []).find((x) => x.index === -1);
+    ok('全员探测包含 P1 槽（旧实现永远漏掉它）', !!p1Res, JSON.stringify(pingRes?.results));
+    ok('P1 槽探测真实发出请求', hllm.calls.includes('host/good'), hllm.calls.join(','));
+    ok('P1 槽探测成功', p1Res?.ok === true);
+    ok('P1 视图带上探测证据（前端据此脱灰）',
+      typeof snapH?.p1?.lastProbeAt === 'number' && snapH.p1.lastProbeAt > 0,
+      JSON.stringify(snapH?.p1?.lastProbeAt));
+
+    // ② 探测失败的路由：必须有时间戳 + probeOk=false，前端才能画黄「探测失败」
+    //    而不是灰「未测」——这是"测过且挂了"与"压根没测"的唯一区分。
+    const failedEntry = (snapH?.entries || []).find((e) => e.model === 'auth');
+    ok('探测失败也记时间戳（旧实现不记，失败=未测无法区分）',
+      typeof failedEntry?.lastProbeAt === 'number' && failedEntry.lastProbeAt > 0,
+      JSON.stringify(failedEntry?.lastProbeAt));
+    ok('探测失败 probeOk=false 且带错误码',
+      failedEntry?.probeOk === false && !!failedEntry?.probeError?.code,
+      JSON.stringify(failedEntry?.probeError));
+  }
+}
+
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} 项通过`);
 if (failed.length) {

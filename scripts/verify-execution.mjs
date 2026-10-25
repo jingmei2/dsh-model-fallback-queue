@@ -75,6 +75,9 @@ function makeLlm() {
 function makeCtx(settingsValue, injectedLlm) {
   const doc = { ns: 'dsh-model-fallback-queue', revision: 1, value: { ...settingsValue } };
   const events = [];
+  // 钩子表：agent/request 与 agent/request-error 的瀑布必须能被真实调用，
+  // 否则"覆盖路由时剥档位"这种逻辑只能靠读源码断言——那测不到真实流程。
+  const hooks = {};
   const ctx = {
     settings: {
       describe: () => [doc],
@@ -85,7 +88,7 @@ function makeCtx(settingsValue, injectedLlm) {
       warn: (...a) => events.push(['warn', ...a]),
       debug: () => {},
     },
-    on: () => () => {},
+    on: (name, fn) => { hooks[name] = fn; return () => {}; },
     effect: (fn) => { fn(); return () => {}; },
     plugin: (p) => {
       const Ctor = p && (p.default || p);
@@ -98,7 +101,7 @@ function makeCtx(settingsValue, injectedLlm) {
     llm: injectedLlm,
     emit: () => {},
   };
-  return { ctx, doc, events };
+  return { ctx, doc, events, hooks };
 }
 
 const mod = await import(join(root, 'index.js'));
@@ -203,6 +206,72 @@ ok('index.js 可被真实 import', typeof mod.apply === 'function');
     // 监控不能把自己监控死：探测失败只记证据，不许累计熔断
     ok('探测失败不会自己熔断路由', opened === 0, `open=${opened}`);
     ok('探测结束后进度已清空', snapAfter?.probingAll === false);
+  }
+}
+
+// ================= 场景 F：推理档位 —— 覆盖路由必须剥掉，能力不匹配不算路由死亡 =======
+// 复现真实报错：会话模型（支持 balanced）→ 插件覆盖到 qodercn/qfmodel（不支持）→
+// 宿主 resolveCallWithInfo 本地抛 UNSUPPORTED_REASONING_EFFORT，请求一条都没发出去。
+// 旧实现 `{ ...cfg, provider, model }` 会把 reasoningEffort 原样带过去，于是：
+//   探测（不带档位）判健康 → 真实请求必挂 → 挂的还记在路由头上。
+{
+  const { ctx, hooks } = makeCtx({ enabled: true, pingIntervalMs: 0, p1Follow: false }, makeLlm());
+  const plug = mod.apply(ctx, { enabled: true });
+  await new Promise((r) => setTimeout(r, 150));
+  const svc = ctx.__service;
+  ok('捕获到 agent/request 钩子', typeof hooks['agent/request'] === 'function');
+  ok('捕获到 agent/request-error 钩子', typeof hooks['agent/request-error'] === 'function');
+
+  if (svc && hooks['agent/request']) {
+    await svc.setQueue([
+      { provider: 'p', model: 'good', pinned: false },
+      { provider: 'p', model: 'auth', pinned: false },
+    ]);
+    const cfg = { provider: 'host', model: 'flagship', reasoningEffort: 'balanced', maxTokens: 100, temperature: 0.5 };
+    const out = await hooks['agent/request'](
+      { agent: { session: { id: 'sess-reasoning' } } },
+      async () => cfg,
+    );
+    ok('覆盖到队列路由', out?.provider === 'p' && out?.model === 'good', `${out?.provider}/${out?.model}`);
+    ok('覆盖路由时剥离 reasoningEffort（否则宿主本地拒绝，请求发不出去）',
+      out?.reasoningEffort === undefined, `reasoningEffort=${JSON.stringify(out?.reasoningEffort)}`);
+    ok('其余请求字段原样保留', out?.maxTokens === 100 && out?.temperature === 0.5);
+    ok('不修改宿主传进来的原对象', cfg.reasoningEffort === 'balanced');
+
+    // 能力不匹配：不能算路由死亡，但必须允许切走（换台支持档位的模型就能救）
+    const errRes = await hooks['agent/request-error']({
+      provider: 'p',
+      agent: { session: { id: 'sess-reasoning' }, callConfig: { model: 'good' } },
+      failure: {
+        code: 'UNSUPPORTED_REASONING_EFFORT',
+        message: 'provider "p" model "good" does not support reasoning effort "balanced"',
+      },
+    }, async () => undefined);
+    const snap = await svc.snapshot();
+    const failedEntry = (snap?.entries || []).find((e) => e.model === 'good');
+    ok('能力不匹配不熔断失败路由（模型本身没坏）',
+      failedEntry?.state !== 'open', `state=${failedEntry?.state}`);
+    ok('能力不匹配被识别为 capability 而不是 unknown（否则会被当路由故障）',
+      failedEntry?.lastError?.source === 'capability', `source=${failedEntry?.lastError?.source}`);
+    ok('能力不匹配仍然切换（换路由能救这一轮请求）', errRes?.kind === 'retry', JSON.stringify(errRes));
+  }
+}
+
+// ================= 场景 G：P1 放行时不动用户自己的档位 =================
+{
+  const { ctx, hooks } = makeCtx({ enabled: true, pingIntervalMs: 0, p1Follow: true }, makeLlm());
+  const plug = mod.apply(ctx, { enabled: true });
+  await new Promise((r) => setTimeout(r, 150));
+  const svc = ctx.__service;
+  if (svc && hooks['agent/request']) {
+    await svc.setQueue([{ provider: 'p', model: 'auth', pinned: false }]);
+    const out = await hooks['agent/request'](
+      { agent: { session: { id: 'sess-p1' } } },
+      async () => ({ provider: 'host', model: 'flagship', reasoningEffort: 'balanced' }),
+    );
+    ok('P1 放行时保留用户档位（没换模型就别动它）',
+      out?.reasoningEffort === 'balanced' && out?.provider === 'host',
+      `${out?.provider}/${out?.model} effort=${JSON.stringify(out?.reasoningEffort)}`);
   }
 }
 

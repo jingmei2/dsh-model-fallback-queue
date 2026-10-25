@@ -2,6 +2,49 @@
 
 本项目更新日志按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] — 换路由时剥离推理档位（修 `UNSUPPORTED_REASONING_EFFORT`）
+
+### 修复
+
+**① 切换到不认推理档位的模型 → 请求 100% 失败（本轮核心）**
+
+会话模型（支持 `balanced`）经队列切到另一个 provider 时，插件用 `{ ...cfg, provider, model }`
+原样透传了 `cfg.reasoningEffort`。宿主的 `LlmService.resolveCallWithInfo` 会在**发请求之前**
+拿它校验目标模型的能力清单，不匹配就本地抛错：
+
+```
+provider "qodercn" model "qfmodel" does not support reasoning effort "balanced"
+UNSUPPORTED_REASONING_EFFORT
+```
+
+这是 0 毫秒的本地拒绝，一条网络请求都没发出去。后果是最难查的一类状态：
+
+- **探测**（`llm.stream` 不带档位）判它健康 → 面板刷绿；
+- **真实请求**（带档位）永远失败 → 用户看到的是"切过去了但用不了"；
+- 失败还被记成路由的锅（`UNKNOWN` → 累计熔断）。
+
+修法有两层：
+
+- **覆盖路由时剥掉 `reasoningEffort`**（`withRouteOverride`）。语义与宿主自己的
+  `dsh-tool-subagent` 一致（`requestedAgentOptions` / `preflightChildLlmRoute`：
+  路由变了就不继承父级档位，让目标模型用自己的默认档）。路由没变（P1 放行）时
+  原样保留，不动用户的选择。
+- **新增 `capability` 失败分类**：`UNSUPPORTED_REASONING_EFFORT` /
+  `INVALID_MODEL_REASONING` 不再当作路由故障——不熔断（模型本身没坏），
+  但**允许切换**并显式跳过失败位置一次（换一条路由能救这一轮请求）。
+  适配层把同一件事降级成 `PI_AI_ERROR`/`UNKNOWN` 时，靠报文措辞也能认出来。
+
+界面同步：错误码表新增「该模型不支持当前的推理档位（切换路由时会自动剥离）」中英文案。
+
+### 验证
+
+- 新增 `scripts/verify-execution.mjs` 场景 F/G：真跑 `agent/request` 与
+  `agent/request-error` 两个瀑布，断言「档位被剥离 / 原对象未被改 / P1 放行时保留档位 /
+  不熔断但切换」。
+- 反向对照：还原 `withRouteOverride` → 剥档位断言变红；删掉 capability 分类 →
+  分类与切换断言双双变红（证明断言有区分力，不是摆设）。
+- `137 源码断言 + 126 队列顺序断言 + 31 执行断言` 全绿。
+
 ## [0.3.0] — 厂商勾选 / 大保底 / 免费付费 / 快速探测（含维护者评审修复）
 
 维护者 [@HelloQingTao](https://github.com/HelloQingTao) 在 PR #2 上做了一轮真机评审

@@ -50,6 +50,7 @@ window.__ModuleLoader__.load({
         hintBadRequest: '请求不合法',
         hintTimeout: '请求超时',
         hintTransport: '链路中断',
+        hintUnsupportedReasoning: '该模型不支持当前的推理档位（切换路由时会自动剥离）',
         unknown: '未知',
         // 时长
         durSeconds: '{n} 秒',
@@ -211,6 +212,7 @@ window.__ModuleLoader__.load({
         hintBadRequest: 'Invalid request',
         hintTimeout: 'Request timed out',
         hintTransport: 'Connection interrupted',
+        hintUnsupportedReasoning: 'This model rejects the current reasoning effort (dropped when the route changes)',
         unknown: 'Unknown',
         durSeconds: '{n} s',
         durMinutes: '{n} min',
@@ -663,6 +665,8 @@ window.__ModuleLoader__.load({
       BAD_REQUEST: 'hintBadRequest',
       TIMEOUT: 'hintTimeout',
       TRANSPORT: 'hintTransport',
+      UNSUPPORTED_REASONING_EFFORT: 'hintUnsupportedReasoning',
+      INVALID_MODEL_REASONING: 'hintUnsupportedReasoning',
     };
 
     /**

@@ -91,8 +91,31 @@ function isClientFaultCode(code) {
   return typeof code === 'string' && CLIENT_FAULT_CODES.has(code);
 }
 
+/**
+ * 能力不匹配码：请求的形状（典型是推理档位）目标模型不认。
+ *
+ * 与「调用侧自伤」的区别必须分开处理：这类失败**不代表路由坏了**——模型本身
+ * 好好的，只是它不吃上一台模型设置的档位，所以不能熔断；但换一条路由确实能
+ * 救回来，这正是本插件存在的意义，因此它必须允许切换（见 onFailedAttempt）。
+ *
+ * 宿主的 LlmService 在发请求前做能力校验、0 毫秒本地拒绝：
+ *   throw new LlmError(`provider "..." model "..." does not support reasoning effort "balanced"`,
+ *                      "UNSUPPORTED_REASONING_EFFORT")
+ * 请求根本没出去——所以它既不是网络问题，也不是额度问题。
+ */
+const CAPABILITY_CODES = new Set(['UNSUPPORTED_REASONING_EFFORT', 'INVALID_MODEL_REASONING']);
+
+/** 适配层把能力不匹配降级成兜底码（PI_AI_ERROR/UNKNOWN）时，靠报文认出来 */
+const UNSUPPORTED_EFFORT_TEXT = /does not support reasoning effort|reasoning effort .*not supported/i;
+
 /** 失败来源分类（见 classifyFailureSource） */
-const FAILURE_SOURCE = { PROVIDER: 'provider', TRANSPORT: 'transport', UNKNOWN: 'unknown', CALLER: 'caller' };
+const FAILURE_SOURCE = {
+  PROVIDER: 'provider',
+  TRANSPORT: 'transport',
+  UNKNOWN: 'unknown',
+  CALLER: 'caller',
+  CAPABILITY: 'capability',
+};
 
 /** 适配层的"分类失败"兜底码：本身不携带"是谁的问题"的信息 */
 const FALLBACK_CODES = new Set(['PI_AI_ERROR', 'UNKNOWN']);
@@ -130,6 +153,8 @@ function looksLikeQuota(message) {
  *             既不秒切（避免把健康路由误杀），持续失败也终究会切走。
  * - caller    请求本身有问题，或 Runtime 自伤（插件/宿主 bug）→ 换模型救不了：
  *             不熔断、不切游标，只记原因让 UI 说清"为什么没切"。
+ * - capability 请求形状与目标模型能力不匹配（推理档位不支持）→ 不是路由坏了，
+ *             不熔断；但换一条路由能救，所以允许切换。
  *
  * @param {string} code 适配层给出的错误码
  * @param {unknown} message 上游错误原文
@@ -140,10 +165,17 @@ function looksLikeQuota(message) {
 function classifyFailureSource(code, message, status, immediateCodes) {
   // 1) 请求本身不合法（宿主已明确分类），或请求体类状态码
   if (isClientFaultCode(code)) return FAILURE_SOURCE.CALLER;
+  // 1.5) 能力不匹配：必须在 CALLER_STATUS 之前判——这个错误也可能带 400，
+  //      但"换模型救不了"的结论对它不成立（换一台支持该档位的模型就好了）。
+  if (CAPABILITY_CODES.has(code)) return FAILURE_SOURCE.CAPABILITY;
   if (typeof status === 'number' && CALLER_STATUS.has(status)) return FAILURE_SOURCE.CALLER;
   // 2) 兜底码 + Runtime 自伤特征：这是插件/宿主的问题，不是 provider 的
   if (FALLBACK_CODES.has(code) && SELF_FAULT_TEXT.test(typeof message === 'string' ? message : '')) {
     return FAILURE_SOURCE.CALLER;
+  }
+  // 2.5) 适配层丢掉了错误码、只把报文透传上来时，靠措辞认出同一件事
+  if (FALLBACK_CODES.has(code) && UNSUPPORTED_EFFORT_TEXT.test(typeof message === 'string' ? message : '')) {
+    return FAILURE_SOURCE.CAPABILITY;
   }
   // 3) 上游明确的问题源。刻意用 !FALLBACK_CODES.has(code) 挡一道：历史配置里若还留着
   //    PI_AI_ERROR/UNKNOWN，分层判定优先于旧配置，不会被拉回无条件熔断。
@@ -160,7 +192,6 @@ function classifyFailureSource(code, message, status, immediateCodes) {
 
 /** 熔断原因正文的上限：上游偶尔把整页 HTML / 长堆栈当 message 回传，不能整段塞进快照 */
 const MAX_REASON_LENGTH = 300;
-
 /**
  * 收敛上游报错原文成一行可展示的短文案（保留原文措辞，只压空白 + 截断）。
  * @param {unknown} message 上游错误信息
@@ -171,6 +202,34 @@ function normalizeReason(message) {
   const oneLine = message.replace(/\s+/g, ' ').trim();
   if (oneLine.length <= MAX_REASON_LENGTH) return oneLine;
   return `${oneLine.slice(0, MAX_REASON_LENGTH)}…`;
+}
+
+/**
+ * 把请求配置换成队列里的目标路由，并**剥掉推理档位**。
+ *
+ * 为什么必须剥：cfg.reasoningEffort（如 'balanced'）是「上一台模型」的能力选择。
+ * 宿主的 LlmService 在发请求前拿它去校验目标模型的能力清单（resolveCallWithInfo），
+ * 不匹配就直接抛 UNSUPPORTED_REASONING_EFFORT —— 那是本地 0 毫秒拒绝，一条请求
+ * 都没发出去。于是会出现最难查的一种状态：
+ *
+ *   探测（不带档位）判它健康 → 真实请求（带档位）永远失败 → 失败还被记成路由的锅
+ *
+ * 语义与宿主自己的 `dsh-tool-subagent` 一致（requestedAgentOptions /
+ * preflightChildLlmRoute）：路由变了就不继承父级 reasoningEffort，只让目标模型
+ * 用它自己的默认档位。路由没变时原样返回，不动用户的选择。
+ *
+ * @param {object} cfg 宿主传入的原始请求配置
+ * @param {{provider: string, model: string}} route 目标路由
+ * @returns {object} 可直接下发给宿主的配置
+ */
+function withRouteOverride(cfg, route) {
+  const routeChanged = cfg.provider !== route.provider || cfg.model !== route.model;
+  if (!routeChanged) return cfg;
+  if (cfg.reasoningEffort === undefined) {
+    return { ...cfg, provider: route.provider, model: route.model };
+  }
+  const { reasoningEffort: _dropped, ...rest } = cfg;
+  return { ...rest, provider: route.provider, model: route.model };
 }
 
 function createRouter(config, log) {
@@ -367,7 +426,8 @@ function createRouter(config, log) {
 
   /**
    * 记一次失败并判定是否熔断。分层规则见 classifyFailureSource：
-   * provider 立即熔断；transport/unknown 按 failureThreshold 累积；caller 不计失败。
+   * provider 立即熔断；transport/unknown 按 failureThreshold 累积；
+   * caller 不计失败；capability 同样不计失败（模型没坏，只是不吃这个请求形状）。
    * @returns {string} 本次失败的来源分类（调用方可据此决定要不要切路由）
    */
   function recordFailure(route, code, message, retryAfterMs, status) {
@@ -375,8 +435,8 @@ function createRouter(config, log) {
     c.lastAttemptAt = Date.now();
     const source = classifyFailureSource(code, message, status, config.immediateCodes);
     stampFailure(c, code, message, retryAfterMs, source);
-    if (source === FAILURE_SOURCE.CALLER) {
-      // 调用侧问题：不计失败、不熔断，但把原因记进电路，UI 才能解释"为什么没切"
+    if (source === FAILURE_SOURCE.CALLER || source === FAILURE_SOURCE.CAPABILITY) {
+      // 两类都不算路由的账，但把原因记进电路：UI 才能解释"为什么没切"/"为什么切了"
       touch();
       return source;
     }
@@ -676,11 +736,14 @@ function createRouter(config, log) {
       // 熔断，也不能把游标钉过去，否则一条坏请求会让健康路由整段冷却 60s。
       // 这个判定必须在 setCursor 之前——游标被钉到别的下标后，resolveIndex() 会推出
       // 下一条可用路由，等于对调用侧错误也做了一次切换。
-      if (classifyFailureSource(code, failure?.message, failure?.status, config.immediateCodes)
-        === FAILURE_SOURCE.CALLER) {
+      const source = classifyFailureSource(code, failure?.message, failure?.status, config.immediateCodes);
+      if (source === FAILURE_SOURCE.CALLER) {
         recordFailure(failedRoute, code, failure?.message, failure?.providerRetryAfterMs, failure?.status);
         return false;
       }
+      // capability（推理档位不被目标模型支持）刻意**不在这里 return**：
+      // recordFailure 内部对它不计失败、不熔断，但这条路我们仍然要走下去——
+      // 换一台支持该档位的模型就能成就这一轮请求，只是失败的那条不该背锅。
       // 游标钉到实际失败的这条路由上，再算下一个。否则："P1 跟随当前模型"模式下
       // 用户手动选了 P3、P3 挂了，游标还停在 P2，resolveIndex() 会认为 P2 正常并
       // 直接返回，切换根本不发生；或者 resolveIndex() 从旧游标推出来的下一站是刚
@@ -690,6 +753,22 @@ function createRouter(config, log) {
       // 手动意图随失败失效：用户手选的那条挂了，manualIndex 必须清掉，否则新会话
       // （或游标被清空之后）会继续回落到这条已经判死的路由，表现成"切走了又自己跳回去"。
       if (runtime.manualIndex === pos) runtime.manualIndex = null;
+      // capability：请求形状（推理档位）不被这条模型接受。recordFailure 已按
+      // 「不计失败、不熔断」分流，所以 resolveIndex 会认为它"仍然可用"并原地返回
+      // 同一条——那样这一轮请求就白挂了。这里显式跳过失败位置一次：换一条路由能
+      // 救这一轮，而失败那条的健康状态一点没动，下一条请求仍可能再试它。
+      if (source === FAILURE_SOURCE.CAPABILITY) {
+        const next = pickFrom(pos, { allowP1: true });
+        if (next === null || next === pos) {
+          touch();
+          return false;
+        }
+        setCursor(sessionId, next);
+        setInFlight(sessionId, next);
+        runtime.lastSwitch = { from: pos, to: next, code, at: Date.now() };
+        touch();
+        return true;
+      }
       // 真实请求失败是比探测更强的证据：最近的请求证据直接改判失败（由调用方在
       // request-error 钩子里写 lastRequest，这里不再维护第二条回执）。
       const nextIdx = this.resolveIndex(Date.now(), sessionId);
@@ -732,9 +811,12 @@ function createRouter(config, log) {
           // 配置级死亡（无适配器）：UI 据此直接标"配置失效"而不是"熔断中"
           invalid: health.get(key) === HEALTH.INVALID,
           // 熔断原因（ⓘ 悬浮提示）：只在电路非正常态时给出，健康路由不背历史失败的账
-          // caller 类失败不进熔断，但同样要能解释"为什么没切"：所以它的原因
-          // 在 closed 状态下也下发（其余状态仍只在非正常态给，健康路由不背旧账）。
-          lastError: c.lastCode && (c.state !== CIRCUIT.CLOSED || c.lastSource === FAILURE_SOURCE.CALLER)
+          // caller / capability 两类失败不进熔断，但同样要能解释"为什么没切"或
+          // "为什么这条被跳过了"：所以它们的原因在 closed 状态下也下发
+          // （其余状态仍只在非正常态给，健康路由不背旧账）。
+          lastError: c.lastCode && (c.state !== CIRCUIT.CLOSED
+            || c.lastSource === FAILURE_SOURCE.CALLER
+            || c.lastSource === FAILURE_SOURCE.CAPABILITY)
             ? { code: c.lastCode, message: c.lastMessage, source: c.lastSource || null }
             : null,
           // 失败来源分层（provider/transport/unknown/caller）：caller = 请求或 Runtime
@@ -1470,7 +1552,19 @@ export function apply(ctx, pluginConfig = {}) {
         router.setInFlight(sessionId, idx);
         router.runtime.lastProposal = { ...lastProposal };
         router.touch();
-        return { ...cfg, provider: route.provider, model: route.model };
+        // 换路由就剥掉推理档位：目标模型不认上一台的档位时，宿主会在本地直接
+        // 拒绝（UNSUPPORTED_REASONING_EFFORT），请求一条都发不出去。详见
+        // withRouteOverride 的注释。
+        if (cfg.reasoningEffort !== undefined
+          && (cfg.provider !== route.provider || cfg.model !== route.model)) {
+          ctx.logger?.info?.(
+            '[fallback-queue] dropped reasoningEffort "%s" for route %s/%s (capability belongs to the previous model)',
+            cfg.reasoningEffort,
+            route.provider,
+            route.model,
+          );
+        }
+        return withRouteOverride(cfg, route);
       } catch (e) {
         ctx.logger?.warn?.('[fallback-queue] agent/request override skipped: %s', e?.message);
         lastProposal = null;

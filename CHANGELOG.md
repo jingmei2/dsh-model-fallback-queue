@@ -186,6 +186,18 @@ node --check index.js && node --check client.js && node --check state.js
 - 设置页的「切换」按钮同样接入验证回执，切完有结论。
 - 验证回执处于 pending 时前端加快轮询（1s），结论不再拖到下一个 5s 周期。
 
+## [0.2.6] - 2026-10-24
+
+### 性能优化
+
+- 移除状态点常驻呼吸动画，降低 GPU 占用；圆点改为常亮静止，颜色语义不变。
+
+### 交互
+
+- 图标悬停时显示状态色光环。
+
+[0.2.6]: https://github.com/HelloQingTao/dsh-model-fallback-queue/compare/v0.2.5...v0.2.6
+
 ## [0.3.0 功能详录] — 四大功能的完整说明
 
 ### 新增

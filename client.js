@@ -1681,6 +1681,7 @@ window.__ModuleLoader__.load({
         h(
           'button',
           {
+            className: 'fq-badge',
             onClick: () => setOpen((v) => !v),
             title: `${t('failoverTitle')} · ${lbl(effective)} ${effHealth.text}${effHealth.detail ? ` · ${effHealth.detail}` : ''}`,
             'aria-label': t('failoverTitle'),
@@ -1698,14 +1699,15 @@ window.__ModuleLoader__.load({
               lineHeight: '24px',
               padding: 0,
               transition: 'border-color .15s, box-shadow .15s',
-              boxShadow: open ? `0 0 0 2px ${toneColor}33` : 'none',
+              // 悬停/点开光环（瞬态，对齐 icon-styles.md）：非 open 时不写内联 boxShadow，交由 .fq-badge:hover CSS 生效
+              '--fq-dot-color': toneColor,
+              boxShadow: open ? `0 0 0 2px ${toneColor}33` : undefined,
             },
           },
           label,
-          // 右上角健康状态小圆点（带呼吸闪烁）
+          // 右上角健康状态小圆点（常亮静止；禁用态半透明）
           h('span', {
-            className: allOpen ? 'fq-dot fq-dot-fast' : enabled === false ? 'fq-dot fq-dot-off' : 'fq-dot',
-            style: { '--fq-dot-color': toneColor },
+            className: enabled === false ? 'fq-dot fq-dot-off' : 'fq-dot',
           }),
         ),
         open
@@ -2080,17 +2082,15 @@ window.__ModuleLoader__.load({
     }
 
     function registerSlots(ctx, rpcFace) {
-        // 健康圆点动画样式（幂等注入一次）
+        // 健康圆点样式：常亮静止、零动画（幂等注入一次）。动画版实测 GPU 常驻 +12~27 点，已废弃。
         if (!document.getElementById('fq-dot-style')) {
           const st = document.createElement('style');
           st.id = 'fq-dot-style';
           st.textContent = `
             .fq-dot{position:absolute;top:-2px;right:-2px;width:5px;height:5px;border-radius:50%;
-              background:var(--fq-dot-color,#22c55e);border:1.5px solid var(--dsw-alias-bg-overlay,#fff);
-              animation:fq-pulse 2s ease-in-out infinite;}
-            .fq-dot-fast{animation-duration:1s;}
-            .fq-dot-off{animation:none;opacity:.6;}
-            @keyframes fq-pulse{0%,100%{opacity:1;box-shadow:0 0 0 0 var(--fq-dot-color)}50%{opacity:.35;box-shadow:0 0 0 3px transparent}}`;
+              background:var(--fq-dot-color,#22c55e);border:1.5px solid var(--dsw-alias-bg-overlay,#fff);}
+            .fq-dot-off{opacity:.6;}
+            .fq-badge:hover{box-shadow:0 0 0 2px var(--fq-dot-color)33;}`;
           document.head.appendChild(st);
         }
         // host 桥：经 ctx（client side）调用 host 侧设置与运行态。
